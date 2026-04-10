@@ -55,23 +55,30 @@ When you export a conversion, it generates a JSON file containing all frame data
 
 ```json
 {
-  "width": 120,
-  "height": 40,
-  "fps": 14,
+  "meta": {
+    "source": "input.gif",
+    "charWidth": 120,
+    "charHeight": 55,
+    "frameCount": 38,
+    "fps": 17,
+    "hasColor": true
+  },
   "frames": [
-    {
-      "chars": "█████▓▒░...",
-      "colors": [255, 128, 64, ...]
-    }
+    "█████▓▒░ ...",
+    "..."
   ],
-  "palette": [[255, 0, 0], [0, 255, 0], ...],
-  "settings": {
-    "ramp": "detailed",
-    "color": true,
-    "invert": false
-  }
+  "palette": ["#000000", "#ff3300", "#00ff88", "..."],
+  "colorMaps": [
+    [0, 2, 1, 0, 3, ...],
+    "..."
+  ]
 }
 ```
+
+- **`meta`** — conversion settings: dimensions in characters, FPS, source filename
+- **`frames`** — one string per frame; each character maps to one cell in the grid (left→right, top→bottom)
+- **`palette`** — shared list of CSS hex color strings used across all frames
+- **`colorMaps`** — per-frame arrays of palette indices, one index per character in `frames[i]`
 
 ### Visualizing JSON Files
 
@@ -83,24 +90,26 @@ fetch('my-conversion.json')
   .then(data => {
     const canvas = document.getElementById('viewer');
     const ctx = canvas.getContext('2d');
-    const charWidth = canvas.width / data.width;
-    const charHeight = canvas.height / data.height;
+    const cols = data.meta.charWidth;
+    const rows = data.meta.charHeight;
+    const charWidth = canvas.width / cols;
+    const charHeight = canvas.height / rows;
+
+    ctx.font = `${Math.floor(charHeight * 0.9)}px 'Courier New', monospace`;
+    ctx.textBaseline = 'top';
+
+    // Clear background
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     // Render first frame
-    let pos = 0;
-    for (let y = 0; y < data.height; y++) {
-      for (let x = 0; x < data.width; x++) {
-        const char = data.frames[0].chars[pos];
-        const colorIdx = data.frames[0].colors[pos];
-        const [r, g, b] = data.palette[colorIdx];
-        ctx.fillStyle = `rgb(${r},${g},${b})`;
-        ctx.fillText(char, x * charWidth, y * charHeight);
-        pos++;
-      }
-    }
-  });
-```
-
+    const chars = data.frames[0];        // string of characters
+    const colorMap = data.colorMaps[0];  // palette index per character
+    for (let pos = 0; pos < chars.length; pos++) {
+      const x = pos % cols;
+      const y = Math.floor(pos / cols);
+      ctx.fillStyle = data.palette[colorMap[pos]] || '#ffffff';
+      ctx.fillText(chars[pos], x * charWidth, y * charHeight);
 ## Technical Details
 
 - **Web Frontend**: Vanilla JavaScript with Canvas 2D rendering
