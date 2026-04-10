@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>video2pretext</title>
+    <link rel="stylesheet" href="app.css">
+    <script type="importmap">
+    {
+        "imports": {
+            "@chenglou/pretext": "https://esm.sh/@chenglou/pretext@0.0.5",
+            "gifuct-js": "https://esm.sh/gifuct-js@2.1.2"
+        }
+    }
+    </script>
+</head>
+
+<body>
+    <div id="app">
+
+        <!-- ── Drop screen ─────────────────────────────────── -->
+        <div id="drop-screen">
+            <div id="drop-zone">
+                <div class="drop-icon">🎬</div>
+                <p>Drop an image, GIF, or <code>.json</code> file here</p>
+                <p class="hint">PNG · JPG · GIF · WebP · BMP · JSON</p>
+                <input type="file" id="file-input" accept="image/*,.json" hidden>
+            </div>
+        </div>
+
+        <!-- ── Main workspace ──────────────────────────────── -->
+        <div id="workspace" class="hidden">
+
+            <!-- Left sidebar -->
+            <aside id="sidebar">
+                <h1>video2pretext</h1>
+
+                <!-- Source thumbnail + re-load -->
+                <div id="source-section">
+                    <img id="source-thumb" alt="">
+                    <div id="source-name"></div>
+                    <button id="btn-new" class="btn-ghost btn-small">Load another ↩</button>
+                </div>
+
+                <hr>
+
+                <!-- Convert settings (hidden for JSON input) -->
+                <section id="convert-section">
+                    <h2>Convert</h2>
+
+                    <label class="field">
+                        <span>Width <em id="width-val"></em></span>
+                        <input type="range" id="s-width" min="40" max="300" step="10" value="120">
+                    </label>
+
+                    <label class="field">
+                        <span>Ramp</span>
+                        <select id="s-ramp">
+                            <option value="detailed" selected>Detailed</option>
+                            <option value="simple">Simple</option>
+                            <option value="blocks">Blocks ░▒▓</option>
+                        </select>
+                    </label>
+
+                    <label class="field toggle">
+                        <span>Invert brightness</span>
+                        <input type="checkbox" id="s-invert">
+                    </label>
+
+                    <label class="field toggle">
+                        <span>Include color data</span>
+                        <input type="checkbox" id="s-color">
+                    </label>
+
+                    <div id="gif-settings" class="hidden">
+                        <label class="field">
+                            <span>Max frames <em id="maxframes-val"></em></span>
+                            <input type="range" id="s-max-frames" min="10" max="500" step="10" value="200">
+                        </label>
+                    </div>
+
+                    <div id="progress-bar" class="hidden">
+                        <div id="progress-fill"></div>
+                        <span id="progress-text"></span>
+                    </div>
+                </section>
+
+                <hr>
+
+                <!-- View settings -->
+                <section id="view-section">
+                    <h2>Display</h2>
+
+                    <label class="field">
+                        <span>Font size <em id="size-val">14px</em></span>
+                        <input type="range" id="font-size" min="4" max="24" step="1" value="14">
+                    </label>
+
+                    <label class="field toggle">
+                        <span>Light mode</span>
+                        <input type="checkbox" id="light-mode">
+                    </label>
+
+                    <label class="field">
+                        <span>Render</span>
+                        <select id="render-mode">
+                            <option value="mono">Monochrome</option>
+                            <option value="source-color">Source Colors</option>
+                        </select>
+                    </label>
+
+                    <div id="mono-controls">
+                        <label class="field">
+                            <span>Preset</span>
+                            <select id="color-preset">
+                                <option value="matrix">Matrix Green</option>
+                                <option value="cyan">Cyan</option>
+                                <option value="amber">Amber</option>
+                                <option value="magenta">Magenta</option>
+                                <option value="white">White on Black</option>
+                                <option value="black">Black on White</option>
+                                <option value="custom">Custom…</option>
+                            </select>
+                        </label>
+                        <div id="custom-colors" class="hidden">
+                            <label class="field">
+                                <span>Text color</span>
+                                <input type="color" id="custom-fg" value="#00ff41">
+                            </label>
+                            <label class="field">
+                                <span>Background</span>
+                                <input type="color" id="custom-bg" value="#0a0a0a">
+                            </label>
+                        </div>
+                    </div>
+                </section>
+
+                <hr>
+
+                <!-- Export -->
+                <section id="export-section" class="hidden">
+                    <h2>Export</h2>
+                    <button id="btn-download" class="btn-primary">Download JSON</button>
+                    <div id="export-info"></div>
+                </section>
+            </aside>
+
+            <!-- Right: viewer -->
+            <main id="viewer-area">
+
+                <!-- Playback bar -->
+                <div id="playback-bar">
+                    <button id="btn-prev" title="Previous (←)">⏮</button>
+                    <button id="btn-play" title="Play/Pause (Space)">▶</button>
+                    <button id="btn-next" title="Next (→)">⏭</button>
+                    <span id="frame-info">—</span>
+                    <label>Speed
+                        <input type="range" id="speed" min="0.1" max="4" step="0.1" value="1">
+                        <span id="speed-val">1.0×</span>
+                    </label>
+                </div>
+
+                <!-- Canvas -->
+                <div id="canvas-wrap">
+                    <div id="canvas-placeholder">
+                        <span>Conversion preview will appear here</span>
+                    </div>
+                    <canvas id="canvas" class="hidden"></canvas>
+                </div>
+
+                <!-- Info bar -->
+                <div id="info-bar"></div>
+            </main>
+        </div>
+    </div>
+
+    <script type="module" src="app.js"></script>
+</body>
+
+</html>
