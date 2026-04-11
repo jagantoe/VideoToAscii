@@ -84,34 +84,81 @@ When you export a conversion, it generates a JSON file containing all frame data
 
 ### Visualizing JSON Files
 
-Simple viewer snippet to render JSON files programmatically:
+`viewer.html` is a ready-made, self-contained player — open it in any browser and drop a `.json` file onto it. It supports monochrome + source-color rendering, 16 color presets, font size, light/dark theme, play/pause, frame stepping, and speed control.
 
-```javascript
-fetch('my-conversion.json')
-  .then(r => r.json())
-  .then(data => {
-    const canvas = document.getElementById('viewer');
-    const ctx = canvas.getContext('2d');
-    const cols = data.meta.charWidth;
-    const rows = data.meta.charHeight;
-    const charWidth = canvas.width / cols;
-    const charHeight = canvas.height / rows;
+#### Key parts for building your own player
 
-    ctx.font = `${Math.floor(charHeight * 0.9)}px 'Courier New', monospace`;
-    ctx.textBaseline = 'top';
+**Text layout** — `viewer.html` uses [Pretext.js](https://github.com/chenglou/pretext) (`@chenglou/pretext` via esm.sh) for accurate character measurement on a Canvas 2D context. If you want a simpler approach without that dependency, measure a single `'M'` with `ctx.measureText` and step through the frame string character-by-character.
 
-    // Clear background
-    ctx.fillStyle = '#000000';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+**Canvas sizing**
 
-    // Render first frame
-    const chars = data.frames[0];        // string of characters
-    const colorMap = data.colorMaps[0];  // palette index per character
-    for (let pos = 0; pos < chars.length; pos++) {
-      const x = pos % cols;
-      const y = Math.floor(pos / cols);
-      ctx.fillStyle = data.palette[colorMap[pos]] || '#ffffff';
-      ctx.fillText(chars[pos], x * charWidth, y * charHeight);
+```js
+ctx.font = '14px "Courier New", monospace'
+const charW = ctx.measureText('M').width
+const charH = Math.ceil(14 * 1.2)           // font-size * line-height factor
+canvas.width  = charW * data.meta.charWidth
+canvas.height = charH * data.meta.charHeight
+```
+
+**Rendering a monochrome frame**
+
+```js
+function renderMono(ctx, frameText, cols, charW, charH, fg, bg) {
+    ctx.fillStyle = bg
+    ctx.fillRect(0, 0, canvas.width, canvas.height)
+    ctx.fillStyle = fg
+    ctx.textBaseline = 'top'
+    const lines = frameText.split('\n')
+    for (let i = 0; i < lines.length; i++)
+        ctx.fillText(lines[i], 0, i * charH)
+}
+```
+
+**Rendering a color frame** — palette indices are batched per run of same-color characters to minimise `fillText` calls:
+
+```js
+function renderColor(ctx, frameText, colorMap, palette, cols, charW, charH) {
+    ctx.fillStyle = '#000'
+    ctx.fillRect(0, 0, canvas.width, canvas.height)
+    ctx.textBaseline = 'top'
+    const lines = frameText.split('\n')
+    let offset = 0
+    for (let row = 0; row < lines.length; row++) {
+        const line = lines[row]
+        const y = row * charH
+        let batchStart = 0, batchColor = palette[colorMap[offset]]
+        for (let col = 0; col < line.length; col++) {
+            const c = palette[colorMap[offset + col]]
+            if (c !== batchColor) {
+                ctx.fillStyle = batchColor
+                ctx.fillText(line.slice(batchStart, col), batchStart * charW, y)
+                batchStart = col; batchColor = c
+            }
+        }
+        ctx.fillStyle = batchColor
+        ctx.fillText(line.slice(batchStart), batchStart * charW, y)
+        offset += line.length
+    }
+}
+```
+
+**Playback loop**
+
+```js
+let frameIndex = 0, lastTime = 0
+const frameDuration = 1000 / data.meta.fps
+
+function tick(ts) {
+    if (ts - lastTime >= frameDuration) {
+        frameIndex = (frameIndex + 1) % data.meta.frameCount
+        renderMono(ctx, data.frames[frameIndex], ...)
+        lastTime = ts
+    }
+    requestAnimationFrame(tick)
+}
+requestAnimationFrame(tick)
+```
+
 ## Technical Details
 
 - **Web Frontend**: Vanilla JavaScript with Canvas 2D rendering

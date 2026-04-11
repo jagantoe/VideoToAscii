@@ -9,12 +9,22 @@ const RAMPS = {
 }
 
 const COLOR_PRESETS = {
-    matrix:  { fg: '#00ff41', bg: '#0a0a0a' },
-    cyan:    { fg: '#00ffff', bg: '#0a0a0a' },
-    amber:   { fg: '#ff8800', bg: '#0a0a0a' },
-    magenta: { fg: '#ff00ff', bg: '#0a0a0a' },
-    white:   { fg: '#ffffff', bg: '#0a0a0a' },
-    black:   { fg: '#111111', bg: '#f5f5f0' },
+    matrix:   { fg: '#00ff41', bg: '#0a0a0a' },
+    cyan:     { fg: '#00ffff', bg: '#0a0a0a' },
+    amber:    { fg: '#ff8800', bg: '#0a0a0a' },
+    magenta:  { fg: '#ff00ff', bg: '#0a0a0a' },
+    white:    { fg: '#ffffff', bg: '#0a0a0a' },
+    red:      { fg: '#ff3333', bg: '#0a0a0a' },
+    orange:   { fg: '#ff6633', bg: '#0a0a0a' },
+    blue:     { fg: '#4499ff', bg: '#0a0a0a' },
+    purple:   { fg: '#bb66ff', bg: '#0a0a0a' },
+    gold:     { fg: '#ffd700', bg: '#0a0a0a' },
+    neonpink: { fg: '#ff69b4', bg: '#0a0a0a' },
+    ice:      { fg: '#aaeeff', bg: '#001a33' },
+    forest:   { fg: '#44dd88', bg: '#001a0a' },
+    blood:    { fg: '#cc2200', bg: '#0a0000' },
+    sepia:    { fg: '#c4a265', bg: '#1a1005' },
+    black:    { fg: '#111111', bg: '#f5f5f0' },
 }
 
 // ── App ────────────────────────────────────────────────────────────────────

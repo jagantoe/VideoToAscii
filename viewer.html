@@ -1,0 +1,733 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>pretext viewer</title>
+    <script type="importmap">
+    {
+        "imports": {
+            "@chenglou/pretext": "https://esm.sh/@chenglou/pretext@0.0.5"
+        }
+    }
+    </script>
+    <style>
+        *,
+        *::before,
+        *::after {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        :root {
+            --bg: #0e0e0e;
+            --surface: #181818;
+            --border: #2a2a2a;
+            --text: #c8c8c8;
+            --text-dim: #666;
+            --accent: #00ff41;
+            --accent-dim: #007a20;
+        }
+
+        [data-theme="light"] {
+            --bg: #f0f0ec;
+            --surface: #ffffff;
+            --border: #d0d0cc;
+            --text: #222;
+            --text-dim: #888;
+            --accent: #0066cc;
+            --accent-dim: #cce0ff;
+        }
+
+        html,
+        body {
+            height: 100%;
+            background: var(--bg);
+            color: var(--text);
+            font-family: system-ui, sans-serif;
+            font-size: 13px;
+        }
+
+        /* ── Drop screen ─────────────────────────────────────────────── */
+        #drop-screen {
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+        }
+
+        #drop-zone {
+            text-align: center;
+            border: 2px dashed var(--border);
+            border-radius: 16px;
+            padding: 64px 80px;
+            transition: border-color .15s, background .15s;
+            user-select: none;
+        }
+
+        #drop-zone.dragover,
+        #drop-screen:hover #drop-zone {
+            border-color: var(--accent);
+            background: color-mix(in srgb, var(--accent) 6%, transparent);
+        }
+
+        #drop-zone .icon {
+            font-size: 3rem;
+            margin-bottom: 12px;
+        }
+
+        #drop-zone p {
+            color: var(--text-dim);
+            margin-top: 6px;
+            font-size: 12px;
+        }
+
+        #drop-zone strong {
+            color: var(--text);
+            font-size: 1.1rem;
+        }
+
+        /* ── Workspace ───────────────────────────────────────────────── */
+        #workspace {
+            display: grid;
+            grid-template-columns: 220px 1fr;
+            height: 100vh;
+        }
+
+        /* ── Sidebar ─────────────────────────────────────────────────── */
+        aside {
+            background: var(--surface);
+            border-right: 1px solid var(--border);
+            padding: 16px 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+            overflow-y: auto;
+        }
+
+        aside h1 {
+            font-size: 14px;
+            font-weight: 700;
+            color: var(--accent);
+            letter-spacing: .05em;
+        }
+
+        aside hr {
+            border: none;
+            border-top: 1px solid var(--border);
+        }
+
+        aside h2 {
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: .08em;
+            color: var(--text-dim);
+            margin-bottom: 2px;
+        }
+
+        .field {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .field>span {
+            font-size: 11px;
+            color: var(--text-dim);
+        }
+
+        .field>span em {
+            float: right;
+            color: var(--text);
+            font-style: normal;
+        }
+
+        .field input[type=range] {
+            width: 100%;
+            accent-color: var(--accent);
+            cursor: pointer;
+        }
+
+        .field select,
+        .field input[type=color] {
+            background: var(--bg);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 5px;
+            padding: 4px 6px;
+            font-size: 12px;
+            width: 100%;
+            cursor: pointer;
+        }
+
+        .field.toggle {
+            flex-direction: row;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .field.toggle input[type=checkbox] {
+            accent-color: var(--accent);
+            width: 16px;
+            height: 16px;
+            cursor: pointer;
+        }
+
+        #file-meta {
+            font-size: 11px;
+            color: var(--text-dim);
+            line-height: 1.5;
+        }
+
+        #file-meta strong {
+            color: var(--text);
+            display: block;
+            margin-bottom: 2px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .btn-ghost {
+            background: none;
+            border: 1px solid var(--border);
+            color: var(--text-dim);
+            border-radius: 5px;
+            padding: 5px 10px;
+            font-size: 11px;
+            cursor: pointer;
+            width: 100%;
+        }
+
+        .btn-ghost:hover {
+            border-color: var(--text-dim);
+            color: var(--text);
+        }
+
+        section {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        /* ── Main viewer ─────────────────────────────────────────────── */
+        main {
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        #playback-bar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 14px;
+            border-bottom: 1px solid var(--border);
+            background: var(--surface);
+            flex-shrink: 0;
+        }
+
+        #playback-bar button {
+            background: none;
+            border: 1px solid var(--border);
+            color: var(--text);
+            border-radius: 5px;
+            padding: 4px 10px;
+            font-size: 14px;
+            cursor: pointer;
+            line-height: 1;
+        }
+
+        #playback-bar button:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        #frame-info {
+            font-size: 11px;
+            color: var(--text-dim);
+            margin-right: 4px;
+            min-width: 60px;
+        }
+
+        #playback-bar label {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 11px;
+            color: var(--text-dim);
+            margin-left: auto;
+        }
+
+        #playback-bar input[type=range] {
+            width: 90px;
+            accent-color: var(--accent);
+        }
+
+        #speed-val {
+            color: var(--text);
+            min-width: 28px;
+        }
+
+        #canvas-wrap {
+            flex: 1;
+            overflow: auto;
+            display: flex;
+            align-items: flex-start;
+            justify-content: flex-start;
+            padding: 12px;
+            background: var(--bg);
+        }
+
+        #canvas-placeholder {
+            color: var(--text-dim);
+            font-size: 13px;
+            margin: auto;
+        }
+
+        canvas {
+            display: block;
+            image-rendering: pixelated;
+        }
+
+        #info-bar {
+            padding: 5px 14px;
+            font-size: 11px;
+            color: var(--text-dim);
+            border-top: 1px solid var(--border);
+            background: var(--surface);
+            flex-shrink: 0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- ── Drop screen ──────────────────────────────────────────── -->
+    <div id="drop-screen">
+        <div id="drop-zone">
+            <div class="icon">📄</div>
+            <strong>Drop a pretext <code>.json</code> file here</strong>
+            <p>or click to browse</p>
+            <input type="file" id="file-input" accept=".json,application/json" hidden>
+        </div>
+    </div>
+
+    <!-- ── Workspace ────────────────────────────────────────────── -->
+    <div id="workspace" class="hidden">
+
+        <aside>
+            <h1>pretext viewer</h1>
+
+            <section>
+                <div id="file-meta">
+                    <strong id="file-name"></strong>
+                    <span id="file-details"></span>
+                </div>
+                <button class="btn-ghost" id="btn-new">Load another ↩</button>
+            </section>
+
+            <hr>
+
+            <section>
+                <h2>Display</h2>
+
+                <label class="field">
+                    <span>Font size <em id="size-val">14px</em></span>
+                    <input type="range" id="font-size" min="4" max="24" step="1" value="14">
+                </label>
+
+                <label class="field toggle">
+                    <span>Light mode</span>
+                    <input type="checkbox" id="light-mode">
+                </label>
+
+                <label class="field">
+                    <span>Render</span>
+                    <select id="render-mode">
+                        <option value="mono">Monochrome</option>
+                        <option value="source-color">Source Colors</option>
+                    </select>
+                </label>
+
+                <div id="mono-controls">
+                    <label class="field">
+                        <span>Preset</span>
+                        <select id="color-preset">
+                            <option value="matrix">Matrix Green</option>
+                            <option value="cyan">Cyan</option>
+                            <option value="amber">Amber</option>
+                            <option value="magenta">Magenta</option>
+                            <option value="white">White</option>
+                            <option value="red">Red</option>
+                            <option value="orange">Orange</option>
+                            <option value="blue">Blue</option>
+                            <option value="purple">Purple</option>
+                            <option value="gold">Gold</option>
+                            <option value="neonpink">Neon Pink</option>
+                            <option value="ice">Ice</option>
+                            <option value="forest">Forest</option>
+                            <option value="blood">Blood Red</option>
+                            <option value="sepia">Sepia</option>
+                            <option value="black">Black on White</option>
+                            <option value="custom">Custom…</option>
+                        </select>
+                    </label>
+                    <div id="custom-colors" class="hidden">
+                        <label class="field">
+                            <span>Text color</span>
+                            <input type="color" id="custom-fg" value="#00ff41">
+                        </label>
+                        <label class="field">
+                            <span>Background</span>
+                            <input type="color" id="custom-bg" value="#0a0a0a">
+                        </label>
+                    </div>
+                </div>
+            </section>
+        </aside>
+
+        <main>
+            <div id="playback-bar">
+                <button id="btn-prev" title="Previous (←)">⏮</button>
+                <button id="btn-play" title="Play/Pause (Space)">▶</button>
+                <button id="btn-next" title="Next (→)">⏭</button>
+                <span id="frame-info">—</span>
+                <label>Speed
+                    <input type="range" id="speed" min="0.1" max="4" step="0.1" value="1">
+                    <span id="speed-val">1.0×</span>
+                </label>
+            </div>
+
+            <div id="canvas-wrap">
+                <div id="canvas-placeholder">Drop a <code>.json</code> file to begin</div>
+                <canvas id="canvas" class="hidden"></canvas>
+            </div>
+
+            <div id="info-bar"></div>
+        </main>
+    </div>
+
+    <script type="module">
+        import { layoutWithLines, prepareWithSegments } from '@chenglou/pretext'
+
+        const COLOR_PRESETS = {
+            matrix: { fg: '#00ff41', bg: '#0a0a0a' },
+            cyan: { fg: '#00ffff', bg: '#0a0a0a' },
+            amber: { fg: '#ff8800', bg: '#0a0a0a' },
+            magenta: { fg: '#ff00ff', bg: '#0a0a0a' },
+            white: { fg: '#ffffff', bg: '#0a0a0a' },
+            red: { fg: '#ff3333', bg: '#0a0a0a' },
+            orange: { fg: '#ff6633', bg: '#0a0a0a' },
+            blue: { fg: '#4499ff', bg: '#0a0a0a' },
+            purple: { fg: '#bb66ff', bg: '#0a0a0a' },
+            gold: { fg: '#ffd700', bg: '#0a0a0a' },
+            neonpink: { fg: '#ff69b4', bg: '#0a0a0a' },
+            ice: { fg: '#aaeeff', bg: '#001a33' },
+            forest: { fg: '#44dd88', bg: '#001a0a' },
+            blood: { fg: '#cc2200', bg: '#0a0000' },
+            sepia: { fg: '#c4a265', bg: '#1a1005' },
+            black: { fg: '#111111', bg: '#f5f5f0' },
+        }
+
+        class Viewer {
+            constructor() {
+                this.data = null
+                this.frameCache = new Map()
+                this.charWidth = 0
+                this.currentFrame = 0
+                this.playing = false
+                this.animationId = null
+                this.lastFrameTime = 0
+                this.speedMultiplier = 1
+                this.fontSize = 14
+                this.fgColor = '#00ff41'
+                this.bgColor = '#0a0a0a'
+                this.renderMode = 'mono'
+                this.lightMode = false
+
+                this._bindUI()
+            }
+
+            get font() { return `${this.fontSize}px "Courier New","Consolas",monospace` }
+            get lineHeight() { return Math.ceil(this.fontSize * 1.2) }
+
+            _bindUI() {
+                const dropScreen = document.getElementById('drop-screen')
+                const fileInput = document.getElementById('file-input')
+
+                dropScreen.addEventListener('click', () => fileInput.click())
+                dropScreen.addEventListener('dragover', e => { e.preventDefault(); document.getElementById('drop-zone').classList.add('dragover') })
+                dropScreen.addEventListener('dragleave', () => document.getElementById('drop-zone').classList.remove('dragover'))
+                dropScreen.addEventListener('drop', e => {
+                    e.preventDefault()
+                    document.getElementById('drop-zone').classList.remove('dragover')
+                    const file = e.dataTransfer.files[0]
+                    if (file) this._loadFile(file)
+                })
+                fileInput.addEventListener('change', e => { if (e.target.files[0]) this._loadFile(e.target.files[0]) })
+
+                document.getElementById('btn-new').addEventListener('click', () => this._reset())
+
+                document.getElementById('btn-play').addEventListener('click', () => this._togglePlay())
+                document.getElementById('btn-prev').addEventListener('click', () => this._stepFrame(-1))
+                document.getElementById('btn-next').addEventListener('click', () => this._stepFrame(+1))
+
+                document.getElementById('speed').addEventListener('input', e => {
+                    this.speedMultiplier = parseFloat(e.target.value)
+                    document.getElementById('speed-val').textContent = this.speedMultiplier.toFixed(1) + '×'
+                })
+
+                document.getElementById('font-size').addEventListener('input', e => {
+                    this.fontSize = parseInt(e.target.value)
+                    document.getElementById('size-val').textContent = this.fontSize + 'px'
+                    this.frameCache.clear()
+                    if (this.data) { this._updateCanvasSize(); this._renderFrame(this.currentFrame) }
+                })
+
+                document.getElementById('light-mode').addEventListener('change', e => {
+                    this.lightMode = e.target.checked
+                    document.documentElement.dataset.theme = this.lightMode ? 'light' : 'dark'
+                    if (this.data) this._renderFrame(this.currentFrame)
+                })
+
+                document.getElementById('render-mode').addEventListener('change', e => {
+                    this.renderMode = e.target.value
+                    document.getElementById('mono-controls').style.display = this.renderMode === 'mono' ? '' : 'none'
+                    if (this.data) this._renderFrame(this.currentFrame)
+                })
+
+                document.getElementById('color-preset').addEventListener('change', e => {
+                    const val = e.target.value
+                    document.getElementById('custom-colors').classList.toggle('hidden', val !== 'custom')
+                    if (val !== 'custom') {
+                        this.fgColor = COLOR_PRESETS[val].fg
+                        this.bgColor = COLOR_PRESETS[val].bg
+                    }
+                    if (this.data) this._renderFrame(this.currentFrame)
+                })
+
+                document.getElementById('custom-fg').addEventListener('input', e => {
+                    this.fgColor = e.target.value
+                    if (this.data) this._renderFrame(this.currentFrame)
+                })
+                document.getElementById('custom-bg').addEventListener('input', e => {
+                    this.bgColor = e.target.value
+                    if (this.data) this._renderFrame(this.currentFrame)
+                })
+
+                document.addEventListener('keydown', e => {
+                    if (!this.data) return
+                    if (e.key === ' ') { e.preventDefault(); this._togglePlay() }
+                    else if (e.key === 'ArrowLeft') { e.preventDefault(); this._stepFrame(-1) }
+                    else if (e.key === 'ArrowRight') { e.preventDefault(); this._stepFrame(+1) }
+                })
+            }
+
+            _loadFile(file) {
+                if (!file.name.toLowerCase().endsWith('.json')) {
+                    alert('Please drop a .json file exported by video2pretext.')
+                    return
+                }
+                const reader = new FileReader()
+                reader.onload = e => {
+                    try {
+                        const data = JSON.parse(e.target.result)
+                        if (!data.meta || !Array.isArray(data.frames)) throw new Error('Invalid JSON format')
+                        this._applyData(data, file.name)
+                    } catch (err) {
+                        alert('Error loading JSON: ' + err.message)
+                    }
+                }
+                reader.readAsText(file)
+            }
+
+            _reset() {
+                this._pause()
+                this.data = null
+                this.frameCache.clear()
+                document.getElementById('workspace').classList.add('hidden')
+                document.getElementById('drop-screen').classList.remove('hidden')
+                document.getElementById('file-input').value = ''
+                document.getElementById('canvas').classList.add('hidden')
+                document.getElementById('canvas-placeholder').classList.remove('hidden')
+                document.getElementById('info-bar').textContent = ''
+            }
+
+            _applyData(data, filename) {
+                this._pause()
+                this.data = data
+                this.frameCache.clear()
+                this.currentFrame = 0
+
+                document.getElementById('drop-screen').classList.add('hidden')
+                document.getElementById('workspace').classList.remove('hidden')
+
+                // File info
+                document.getElementById('file-name').textContent = filename || data.meta.source
+                const clr = data.meta.hasColor && data.palette ? ` · ${data.palette.length} colors` : ''
+                document.getElementById('file-details').textContent =
+                    `${data.meta.charWidth}×${data.meta.charHeight} chars · ${data.meta.frameCount} frame(s) · ${data.meta.fps} fps${clr}`
+
+                // Source-color availability
+                const hasColor = data.meta.hasColor && data.palette && data.colorMaps
+                const opt = document.querySelector('#render-mode [value="source-color"]')
+                opt.disabled = !hasColor
+                opt.textContent = hasColor ? 'Source Colors' : 'Source Colors (not in file)'
+                if (!hasColor && this.renderMode === 'source-color') {
+                    this.renderMode = 'mono'
+                    document.getElementById('render-mode').value = 'mono'
+                }
+
+                document.getElementById('canvas-placeholder').classList.add('hidden')
+                document.getElementById('canvas').classList.remove('hidden')
+
+                this._updateCanvasSize()
+                this._renderFrame(0)
+                this._updateInfo()
+                if (data.meta.frameCount > 1) this._play()
+            }
+
+            _updateCanvasSize() {
+                const canvas = document.getElementById('canvas')
+                const ctx = canvas.getContext('2d')
+                ctx.font = this.font
+                this.charWidth = ctx.measureText('M').width
+
+                const pw = Math.ceil(this.charWidth * this.data.meta.charWidth) + 4
+                const ph = this.lineHeight * this.data.meta.charHeight + 4
+                const dpr = window.devicePixelRatio || 1
+
+                canvas.width = pw * dpr
+                canvas.height = ph * dpr
+                canvas.style.width = pw + 'px'
+                canvas.style.height = ph + 'px'
+                ctx.scale(dpr, dpr)
+
+                this._canvasW = pw
+                this._canvasH = ph
+                this._ctx = ctx
+            }
+
+            _getLines(index) {
+                if (this.frameCache.has(index)) return this.frameCache.get(index)
+                const prepared = prepareWithSegments(this.data.frames[index], this.font, { whiteSpace: 'pre-wrap' })
+                const { lines } = layoutWithLines(prepared, this._canvasW * 2, this.lineHeight)
+                this.frameCache.set(index, lines)
+                return lines
+            }
+
+            _renderFrame(index) {
+                this.currentFrame = index
+                const lines = this._getLines(index)
+                const ctx = this._ctx
+                const w = this._canvasW, h = this._canvasH
+                const useSrcColor = this.renderMode === 'source-color' &&
+                    this.data.meta.hasColor && this.data.palette && this.data.colorMaps
+
+                const bg = useSrcColor ? (this.lightMode ? '#f5f5f0' : '#0a0a0a') : this.bgColor
+                ctx.fillStyle = bg
+                ctx.fillRect(0, 0, w, h)
+                ctx.font = this.font
+                ctx.textBaseline = 'top'
+
+                if (useSrcColor) {
+                    this._renderColorFrame(ctx, lines, index)
+                } else {
+                    ctx.fillStyle = this.fgColor
+                    for (let i = 0; i < lines.length; i++)
+                        ctx.fillText(lines[i].text, 2, 2 + i * this.lineHeight)
+                }
+
+                document.getElementById('frame-info').textContent =
+                    `${this.currentFrame + 1} / ${this.data.meta.frameCount}`
+            }
+
+            _renderColorFrame(ctx, lines, frameIndex) {
+                const palette = this.data.palette
+                const colorMap = this.data.colorMaps[frameIndex]
+                if (!colorMap) return
+
+                const cw = this.charWidth
+                let offset = 0
+
+                for (let i = 0; i < lines.length; i++) {
+                    const text = lines[i].text
+                    const y = 2 + i * this.lineHeight
+                    let batchStart = 0
+                    let batchColor = offset < colorMap.length ? palette[colorMap[offset]] : this.fgColor
+
+                    for (let j = 0; j < text.length; j++) {
+                        const c = (offset + j) < colorMap.length ? palette[colorMap[offset + j]] : this.fgColor
+                        if (c !== batchColor) {
+                            ctx.fillStyle = batchColor
+                            ctx.fillText(text.slice(batchStart, j), 2 + batchStart * cw, y)
+                            batchStart = j
+                            batchColor = c
+                        }
+                    }
+                    ctx.fillStyle = batchColor
+                    ctx.fillText(text.slice(batchStart), 2 + batchStart * cw, y)
+                    offset += text.length
+                }
+            }
+
+            _updateInfo() {
+                const m = this.data.meta
+                let t = `${m.source} · ${m.charWidth}×${m.charHeight} chars · ${m.frameCount} frame(s) · ${m.fps} fps`
+                if (m.hasColor && this.data.palette) t += ` · ${this.data.palette.length} colors`
+                document.getElementById('info-bar').textContent = t
+            }
+
+            _play() {
+                if (!this.data || this.data.meta.frameCount <= 1) return
+                this.playing = true
+                document.getElementById('btn-play').textContent = '⏸'
+                this.lastFrameTime = performance.now()
+                this._tick()
+            }
+
+            _pause() {
+                this.playing = false
+                const btn = document.getElementById('btn-play')
+                if (btn) btn.textContent = '▶'
+                if (this.animationId) { cancelAnimationFrame(this.animationId); this.animationId = null }
+            }
+
+            _togglePlay() { if (this.playing) this._pause(); else this._play() }
+
+            _stepFrame(delta) {
+                if (!this.data) return
+                this._pause()
+                const n = this.data.meta.frameCount
+                this._renderFrame((this.currentFrame + delta + n) % n)
+            }
+
+            _tick() {
+                if (!this.playing) return
+                const now = performance.now()
+                const interval = 1000 / (this.data.meta.fps * this.speedMultiplier)
+                if (now - this.lastFrameTime >= interval) {
+                    this._renderFrame((this.currentFrame + 1) % this.data.meta.frameCount)
+                    this.lastFrameTime = now
+                }
+                this.animationId = requestAnimationFrame(() => this._tick())
+            }
+        }
+
+        new Viewer()
+    </script>
+</body>
+
+</html>
