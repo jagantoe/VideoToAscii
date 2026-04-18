@@ -15,8 +15,14 @@ A creative web application that converts images, GIFs, and videos into animated 
   - Adjustable font size and line height
 - **Playback Controls**: Play, pause, frame stepping, speed multiplier (0.1× to 4×)
 - **Theme Support**: Light and dark mode with persistent preference
+- **Color Data Included by Default**: All conversions now include source color data (palette + per-character color indices) for source-color rendering
+- **Modern Video Decoding**: Automatic WebCodecs decoding with fallback to RVFC or frame-seeking
 - **Export**: Save conversions as JSON for later viewing or processing
-- **Performance**: Efficient palette quantization (4-bit per channel) and per-frame indexing
+- **Performance**:
+  - WebAssembly (WASM) acceleration with optional SIMD for pixel encoding
+  - WebCodecs-based video decoding for deterministic frame extraction
+  - Efficient palette quantization (4-bit per channel) and per-frame indexing
+  - Parallel frame processing with Web Worker pool
 
 ## Quick Start
 
@@ -46,10 +52,11 @@ pip install -r requirements.txt
 
 ## JSON Format
 
-When you export a conversion, it generates a JSON file containing all frame data and metadata. This format allows you to:
+When you export a conversion, it generates a JSON file containing all frame data, color palette, and per-frame color indices. This format allows you to:
 - Save conversions for later viewing without re-processing
-- Share ASCII animations with others
+- Share ASCII animations with others (with full color restored in any viewer)
 - Build custom players or tools
+- Render ASCII art with source colors or apply custom color schemes
 
 ### JSON Structure
 

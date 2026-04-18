@@ -170,7 +170,10 @@ self.onmessage = ({ data: { pixels, width, height, ramp, color, idx } }) => {
     }
     const charLut = _cCharLut, lut = _cLut
     const totalPx = width * height
-    const colorBuf = color ? new Uint8Array(totalPx * 3) : null
+    // Emit quantized 12-bit color keys (Uint16) instead of raw RGB (Uint8×3).
+    // Key = ((r&0xF0)<<8)|((g&0xF0)<<4)|(b>>4)  — matches _buildPalette.
+    // Halves color data size and removes re-quantization pass on main thread.
+    const colorKeys = color ? new Uint16Array(totalPx) : null
     const lineBuf = new Array(width)
     const lines = new Array(height)
     for (let y = 0; y < height; y++) {
@@ -179,15 +182,12 @@ self.onmessage = ({ data: { pixels, width, height, ramp, color, idx } }) => {
             const i = (rowOff + x) * 4
             const r = pixels[i], g = pixels[i+1], b = pixels[i+2]
             lineBuf[x] = charLut[lut[(r * 77 + g * 150 + b * 29) >> 8]]
-            if (colorBuf) {
-                const ci = (rowOff + x) * 3
-                colorBuf[ci] = r; colorBuf[ci+1] = g; colorBuf[ci+2] = b
-            }
+            if (colorKeys) colorKeys[rowOff + x] = ((r & 0xF0) << 8) | ((g & 0xF0) << 4) | (b >> 4)
         }
         lines[y] = lineBuf.join('')
     }
-    const transfer = colorBuf ? [colorBuf.buffer] : []
-    self.postMessage({ text: lines.join('\\n'), colorBuf, idx }, transfer)
+    const transfer = colorKeys ? [colorKeys.buffer] : []
+    self.postMessage({ text: lines.join('\\n'), colorKeys, idx }, transfer)
 }
 `
 
@@ -265,7 +265,7 @@ class App {
         this.fontSize    = 14
         this.fgColor     = '#00ff41'
         this.bgColor     = '#0a0a0a'
-        this.renderMode  = 'mono'
+        this.renderMode  = 'source-color'
         this.lightMode   = false
 
         // Conversion
@@ -599,20 +599,23 @@ class App {
                 frames,
             }
             if (allColors.length > 0) {
+                bench.start('palette')
                 const pxPerFrame = charW * charH
                 const { palette, paletteMap } = this._buildPalette(allColors, pxPerFrame)
                 data.palette   = palette
                 data.colorMaps = allColors.map(fc => Array.from(this._mapColors(fc, pxPerFrame, paletteMap)))
+                bench.end('palette')
             }
 
             this._applyData(data)
             bench.report({
-                source:  file.name,
-                grid:    `${data.meta.charWidth}\u00d7${data.meta.charHeight}`,
-                frames:  data.meta.frameCount,
-                fps:     data.meta.fps,
-                color:   data.meta.hasColor,
-                fileMB:  +(file.size / 1048576).toFixed(2),
+                source:     file.name,
+                grid:       `${data.meta.charWidth}\u00d7${data.meta.charHeight}`,
+                frames:     data.meta.frameCount,
+                fps:        data.meta.fps,
+                color:      data.meta.hasColor,
+                fileMB:     +(file.size / 1048576).toFixed(2),
+                decode_via: this._lastDecodeMethod ?? 'n/a',
             })
         } catch (err) {
             if (gen === this._convertGen) {
@@ -737,6 +740,7 @@ class App {
 
         // ── Try WebCodecs first (deterministic, true source fps) ──────────
         bench?.start('video.decode')
+        this._lastDecodeMethod = 'webcodecs'
         let captured = await decodeVideoWebCodecs(
             file, charW, charH, maxFrames, limitFps,
             (n, total) => this._setProgress(Math.round(n / Math.max(1, total) * 50), `Decoding ${n}…`)
@@ -754,7 +758,8 @@ class App {
             const canvas = new OffscreenCanvas(charW, charH)
             const ctx    = canvas.getContext('2d', { willReadFrequently: true })
             const useRvfc = ('requestVideoFrameCallback' in video)
-            console.log(`[video] capture: ${useRvfc ? 'RVFC' : 'seek'}, limitFps=${limitFps || 'source'}`)
+            this._lastDecodeMethod = useRvfc ? 'rvfc' : 'seek'
+            console.log(`[video] capture: ${this._lastDecodeMethod}, limitFps=${limitFps || 'source'}`)
             captured = useRvfc
                 ? await this._captureRVFC(video, ctx, charW, charH, meta.dur, maxFrames, limitFps, gen)
                 : await this._captureSeek(video, ctx, charW, charH, meta.dur, maxFrames, limitFps, gen)
@@ -927,7 +932,7 @@ class App {
             if (gen !== this._convertGen) return { frames: null, allColors: null }
             return {
                 frames:    results.map(r => r.text),
-                allColors: results.map(r => r.colorBuf).filter(Boolean),
+                allColors: results.map(r => r.colorKeys).filter(Boolean),
             }
         }
 
@@ -937,7 +942,7 @@ class App {
             if (gen !== this._convertGen) return { frames: null, allColors: null }
             const ascii = this._pixelsToAscii({ data: imageDataBufs[i] }, charW, charH, ramp, color)
             frames.push(ascii.text)
-            if (ascii.colors) allColors.push(ascii.colors)
+            if (ascii.colorKeys) allColors.push(ascii.colorKeys)
             progressCb?.(i + 1)
         }
         return { frames, allColors }
@@ -965,9 +970,12 @@ class App {
         if (wasm && wasm.encode_frame) {
             try {
                 const colorOut = color ? new Uint8Array(totalPx * 3) : null
-                // wasm-bindgen accepts a JS Uint8Array directly for &[u8].
-                // For Option<Uint8Array> output, we pass a real Uint8Array view.
                 const idx = wasm.encode_frame(imageData.data, width, height, rampLen, colorOut ?? undefined)
+                const colorKeys = colorOut ? new Uint16Array(totalPx) : null
+                if (colorKeys) {
+                    for (let p = 0, ci = 0; p < totalPx; p++, ci += 3)
+                        colorKeys[p] = ((colorOut[ci] & 0xF0) << 8) | ((colorOut[ci+1] & 0xF0) << 4) | (colorOut[ci+2] >> 4)
+                }
                 const lineBuf = new Array(width)
                 const lines = new Array(height)
                 for (let y = 0; y < height; y++) {
@@ -975,14 +983,14 @@ class App {
                     for (let x = 0; x < width; x++) lineBuf[x] = charLut[idx[rowOff + x]]
                     lines[y] = lineBuf.join('')
                 }
-                return { text: lines.join('\n'), colors: colorOut, charW: width, charH: height }
+                return { text: lines.join('\n'), colorKeys, charW: width, charH: height }
             } catch (e) { console.warn('[wasm] encode_frame failed, falling back:', e?.message) }
         }
 
         // ── GPU path ──────────────────────────────────────────────
         const gpuOut = _gpuEncoder.encode(imageData, width, height, rampLen)
         if (gpuOut) {
-            const colorBuf = color ? new Uint8Array(totalPx * 3) : null
+            const colorKeys = color ? new Uint16Array(totalPx) : null
             const lineBuf = new Array(width)
             const lines = new Array(height)
             for (let y = 0; y < height; y++) {
@@ -990,20 +998,19 @@ class App {
                 for (let x = 0; x < width; x++) {
                     const i = (rowOff + x) * 4
                     lineBuf[x] = charLut[gpuOut[i]]
-                    if (colorBuf) {
-                        const ci = (rowOff + x) * 3
-                        colorBuf[ci] = gpuOut[i+1]; colorBuf[ci+1] = gpuOut[i+2]; colorBuf[ci+2] = gpuOut[i+3]
+                    if (colorKeys) {
+                        const r = gpuOut[i+1], g = gpuOut[i+2], b = gpuOut[i+3]
+                        colorKeys[rowOff + x] = ((r & 0xF0) << 8) | ((g & 0xF0) << 4) | (b >> 4)
                     }
                 }
                 lines[y] = lineBuf.join('')
             }
-            return { text: lines.join('\n'), colors: colorBuf, charW: width, charH: height }
+            return { text: lines.join('\n'), colorKeys, charW: width, charH: height }
         }
 
         // ── CPU fallback ─────────────────────────────────────────────────
-        // lut is already populated from the cache above
         const d = imageData.data
-        const colorBuf = color ? new Uint8Array(totalPx * 3) : null
+        const colorKeys = color ? new Uint16Array(totalPx) : null
         const lineBuf = new Array(width)
         const lines = new Array(height)
         for (let y = 0; y < height; y++) {
@@ -1012,24 +1019,20 @@ class App {
                 const i = (rowOff + x) * 4
                 const r = d[i], g = d[i+1], b = d[i+2]
                 lineBuf[x] = charLut[lut[(r * 77 + g * 150 + b * 29) >> 8]]
-                if (colorBuf) {
-                    const ci = (rowOff + x) * 3
-                    colorBuf[ci] = r; colorBuf[ci+1] = g; colorBuf[ci+2] = b
-                }
+                if (colorKeys) colorKeys[rowOff + x] = ((r & 0xF0) << 8) | ((g & 0xF0) << 4) | (b >> 4)
             }
             lines[y] = lineBuf.join('')
         }
-        return { text: lines.join('\n'), colors: colorBuf, charW: width, charH: height }
+        return { text: lines.join('\n'), colorKeys, charW: width, charH: height }
     }
 
-    _buildPalette(allColors, pixelsPerFrame) {
-        // Use integer key: quantized (r4<<8|g4)<<8|b4 — avoids string allocation
+    _buildPalette(allColorKeys, pixelsPerFrame) {
+        // allColorKeys: Uint16Array[] — each value is a pre-quantized 12-bit key
+        // ((r&0xF0)<<8)|((g&0xF0)<<4)|(b>>4), emitted directly by workers.
+        // No re-quantization needed here; just collect unique keys.
         const seen = new Set()
-        for (const buf of allColors) {
-            for (let i = 0, len = pixelsPerFrame * 3; i < len; i += 3) {
-                const k = ((buf[i] & 0xF0) << 8) | ((buf[i + 1] & 0xF0) << 4) | (buf[i + 2] >> 4)
-                seen.add(k)
-            }
+        for (const keys of allColorKeys) {
+            for (let p = 0; p < pixelsPerFrame; p++) seen.add(keys[p])
         }
         const sorted = [...seen].sort((a, b) => a - b)
         const palette = sorted.map(k => {
@@ -1040,12 +1043,10 @@ class App {
         return { palette, paletteMap }
     }
 
-    _mapColors(colorBuf, pixelsPerFrame, paletteMap) {
+    _mapColors(colorKeys, pixelsPerFrame, paletteMap) {
+        // colorKeys is already a Uint16Array of pre-quantized keys — map directly to palette indices.
         const out = new Uint16Array(pixelsPerFrame)
-        for (let p = 0, ci = 0; p < pixelsPerFrame; p++, ci += 3) {
-            const k = ((colorBuf[ci] & 0xF0) << 8) | ((colorBuf[ci + 1] & 0xF0) << 4) | (colorBuf[ci + 2] >> 4)
-            out[p] = paletteMap.get(k)
-        }
+        for (let p = 0; p < pixelsPerFrame; p++) out[p] = paletteMap.get(colorKeys[p]) ?? 0
         return out
     }
 
@@ -1082,11 +1083,17 @@ class App {
         // Show export section
         if (!this.isJsonMode) {
             document.getElementById('export-section').classList.remove('hidden')
-            const jsonStr = JSON.stringify(data)
-            const sizeKB  = (new Blob([jsonStr]).size / 1024).toFixed(1)
-            const clr     = data.meta.hasColor ? `, ${data.palette.length} colors` : ''
+            // Fast size estimate — avoids serializing the full data object on every conversion.
+            // Actual JSON size is computed only on download (user-triggered).
+            const textBytes  = data.frames.reduce((s, f) => s + f.length, 0)
+            const colorBytes = data.colorMaps
+                ? data.meta.frameCount * data.meta.charWidth * data.meta.charHeight * 2
+                : 0
+            const palBytes   = data.palette ? data.palette.length * 10 : 0
+            const sizeKB     = ((textBytes + colorBytes + palBytes + 200) / 1024).toFixed(1)
+            const clr        = data.meta.hasColor ? `, ${data.palette.length} colors` : ''
             document.getElementById('export-info').textContent =
-                `${data.meta.frameCount} frame(s) · ${data.meta.charWidth}×${data.meta.charHeight} · ${sizeKB} KB${clr}`
+                `${data.meta.frameCount} frame(s) · ${data.meta.charWidth}×${data.meta.charHeight} · ~${sizeKB} KB${clr}`
         }
 
         this._updateCanvasSize()
