@@ -87,7 +87,7 @@ class App {
         document.getElementById('btn-download').addEventListener('click', () => this._download())
 
         // Convert settings → schedule re-convert
-        for (const id of ['s-width', 's-ramp', 's-invert', 's-color', 's-max-frames']) {
+        for (const id of ['s-width', 's-ramp', 's-invert', 's-color', 's-max-frames', 's-video-fps']) {
             const el = document.getElementById(id)
             el.addEventListener('input',  () => this._scheduleConvert())
             el.addEventListener('change', () => this._scheduleConvert())
@@ -161,6 +161,7 @@ class App {
         }
         sync('s-width', 'width-val', ' chars')
         sync('s-max-frames', 'maxframes-val', '')
+        sync('s-video-fps', 'videofps-val', ' fps')
     }
 
     // ── File loading ──────────────────────────────────────────────────────
@@ -184,11 +185,19 @@ class App {
             this._loadJSON(file)
         } else {
             const thumb = document.getElementById('source-thumb')
-            thumb.src = URL.createObjectURL(file)
-            thumb.classList.remove('hidden')
+            const isGif   = file.type === 'image/gif' || file.name.toLowerCase().endsWith('.gif')
+            const isVideo = file.type.startsWith('video/') || /\.(mp4|webm|mov|mkv)$/i.test(file.name)
 
-            const isGif = file.type === 'image/gif' || file.name.toLowerCase().endsWith('.gif')
-            document.getElementById('gif-settings').classList.toggle('hidden', !isGif)
+            if (isVideo) {
+                thumb.src = ''
+                thumb.classList.add('hidden')
+            } else {
+                thumb.src = URL.createObjectURL(file)
+                thumb.classList.remove('hidden')
+            }
+
+            document.getElementById('gif-settings').classList.toggle('hidden', !isGif && !isVideo)
+            document.getElementById('video-settings').classList.toggle('hidden', !isVideo)
 
             this._scheduleConvert()
         }
@@ -239,6 +248,7 @@ class App {
             ramp,
             color:     document.getElementById('s-color').checked,
             maxFrames: parseInt(document.getElementById('s-max-frames').value) || 200,
+            targetFps: parseInt(document.getElementById('s-video-fps').value) || 10,
         }
     }
 
@@ -247,7 +257,8 @@ class App {
         const gen = ++this._convertGen
         const settings = this._getConvertSettings()
         const file = this.sourceFile
-        const isGif = file.type === 'image/gif' || file.name.toLowerCase().endsWith('.gif')
+        const isGif   = file.type === 'image/gif' || file.name.toLowerCase().endsWith('.gif')
+        const isVideo = file.type.startsWith('video/') || /\.(mp4|webm|mov|mkv)$/i.test(file.name)
 
         this._setProgress(0, 'Loading…')
 
@@ -257,6 +268,10 @@ class App {
             if (isGif) {
                 const r = await this._convertGif(file, settings, gen)
                 console.log('Conversion result:', r)
+                if (r === null) return
+                ;({ frames, allColors, fps, charW, charH } = r)
+            } else if (isVideo) {
+                const r = await this._convertVideo(file, settings, gen)
                 if (r === null) return
                 ;({ frames, allColors, fps, charW, charH } = r)
             } else {
@@ -345,6 +360,50 @@ class App {
 
         const fps = Math.max(1, Math.round(1000 / (totalDur / total)))
         return { frames, allColors, fps, charW, charH }
+    }
+
+    async _convertVideo(file, { width, ramp, color, maxFrames, targetFps }, gen) {
+        const url   = URL.createObjectURL(file)
+        const video = document.createElement('video')
+        video.src   = url
+        video.muted = true
+        video.preload = 'metadata'
+
+        await new Promise((res, rej) => {
+            video.onloadedmetadata = res
+            video.onerror = () => rej(new Error('Failed to load video metadata'))
+        })
+
+        const duration = video.duration
+        if (!duration || !isFinite(duration)) throw new Error('Cannot determine video duration')
+
+        const totalFrames = Math.min(Math.floor(duration * targetFps), maxFrames)
+        if (totalFrames === 0) throw new Error('No frames to extract')
+
+        const aspect = video.videoHeight / video.videoWidth
+        const charH  = Math.max(1, Math.round(width * aspect * 0.5))
+        const charW  = width
+
+        const canvas = new OffscreenCanvas(charW, charH)
+        const ctx    = canvas.getContext('2d')
+        const frames = [], allColors = []
+
+        for (let i = 0; i < totalFrames; i++) {
+            if (gen !== this._convertGen) { URL.revokeObjectURL(url); return null }
+            if (i % 5 === 0) await new Promise(r => setTimeout(r, 0))
+            this._setProgress(Math.round(i / totalFrames * 100), `Frame ${i + 1}/${totalFrames}`)
+
+            video.currentTime = i / targetFps
+            await new Promise(res => { video.onseeked = res })
+
+            ctx.drawImage(video, 0, 0, charW, charH)
+            const ascii = this._pixelsToAscii(ctx.getImageData(0, 0, charW, charH), charW, charH, ramp, color)
+            frames.push(ascii.text)
+            if (ascii.colors) allColors.push(ascii.colors)
+        }
+
+        URL.revokeObjectURL(url)
+        return { frames, allColors, fps: targetFps, charW, charH }
     }
 
     _pixelsToAscii(imageData, width, height, ramp, color) {

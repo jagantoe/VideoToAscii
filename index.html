@@ -23,9 +23,10 @@
         <div id="drop-screen">
             <div id="drop-zone">
                 <div class="drop-icon">🎬</div>
-                <p>Drop an image, GIF, or <code>.json</code> file here</p>
-                <p class="hint">PNG · JPG · GIF · WebP · BMP · JSON</p>
-                <input type="file" id="file-input" accept="image/*,.json" hidden>
+                <p>Drop an image, GIF, video, or <code>.json</code> file here</p>
+                <p class="hint">PNG · JPG · GIF · WebP · BMP · MP4 · WebM · MOV · JSON</p>
+                <input type="file" id="file-input"
+                    accept="image/*,video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov,.json" hidden>
             </div>
         </div>
 
@@ -77,6 +78,13 @@
                         <label class="field">
                             <span>Max frames <em id="maxframes-val"></em></span>
                             <input type="range" id="s-max-frames" min="10" max="500" step="10" value="200">
+                        </label>
+                    </div>
+
+                    <div id="video-settings" class="hidden">
+                        <label class="field">
+                            <span>Target FPS <em id="videofps-val"></em></span>
+                            <input type="range" id="s-video-fps" min="1" max="30" step="1" value="10">
                         </label>
                     </div>
 

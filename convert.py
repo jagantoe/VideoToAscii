@@ -16,6 +16,8 @@ except ImportError:
 ASCII_RAMP_DETAILED = " .·:;!|ilI1][tf{jrxnuvczXYJ()Cüö0Oqpdb$m#MW&8%B@Ñ"
 # Simple ramp
 ASCII_RAMP_SIMPLE = " .:-=+*#%@"
+# Block elements ramp
+ASCII_RAMP_BLOCKS = " ░▒▓█"
 
 
 def pixel_to_char(brightness, ramp):
@@ -112,7 +114,7 @@ def map_colors_to_indices(frame_colors, palette_map):
     return indices
 
 
-def convert_video(path, width, ramp, target_fps=10, color=False):
+def convert_video(path, width, ramp, target_fps=None, color=False):
     """Convert a video file using OpenCV."""
     try:
         import cv2
@@ -130,7 +132,9 @@ def convert_video(path, width, ramp, target_fps=10, color=False):
         sys.exit(1)
 
     video_fps = cap.get(cv2.CAP_PROP_FPS) or 30
-    frame_interval = max(1, int(video_fps / target_fps))
+    if target_fps is None:
+        target_fps = video_fps
+    frame_interval = max(1, round(video_fps / target_fps))
 
     frames = []
     all_colors = []
@@ -175,12 +179,12 @@ def main():
     parser.add_argument(
         "--fps",
         type=int,
-        default=10,
-        help="Target FPS for video conversion (default: 10)",
+        default=None,
+        help="Target FPS for video conversion (default: use source FPS)",
     )
     parser.add_argument(
         "--ramp",
-        choices=["simple", "detailed"],
+        choices=["simple", "detailed", "blocks"],
         default="detailed",
         help="ASCII character ramp detail level (default: detailed)",
     )
@@ -198,7 +202,7 @@ def main():
         print(f"Error: {input_path} not found", file=sys.stderr)
         sys.exit(1)
 
-    ramp = ASCII_RAMP_SIMPLE if args.ramp == "simple" else ASCII_RAMP_DETAILED
+    ramp = {"simple": ASCII_RAMP_SIMPLE, "blocks": ASCII_RAMP_BLOCKS}.get(args.ramp, ASCII_RAMP_DETAILED)
     if args.invert:
         ramp = ramp[::-1]
 

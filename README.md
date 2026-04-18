@@ -6,7 +6,7 @@ A creative web application that converts images, GIFs, and videos into animated 
 
 ## Features
 
-- **Multi-Format Support**: Convert PNG, JPG, GIF, WebP, and BMP images (video support via Python CLI)
+- **Multi-Format Support**: Convert PNG, JPG, GIF, WebP, BMP, MP4, WebM, and MOV files (both web and Python CLI)
 - **Live Preview**: See conversions instantly as you adjust settings
 - **Customizable Rendering**:
   - 3 ASCII ramp levels (detailed 50-char, simple 10-char, block 5-char)
@@ -21,20 +21,18 @@ A creative web application that converts images, GIFs, and videos into animated 
 ## Quick Start
 
 1. Open `index.html` in a web browser (or serve via HTTP at `localhost:8081`)
-2. Drag and drop an image or GIF onto the canvas
-3. Adjust settings in the sidebar (width, colors, rendering mode, etc.)
+2. Drag and drop an image, GIF, or video onto the canvas
+3. Adjust settings in the sidebar (width, colors, rendering mode, target FPS for video, etc.)
 4. Watch the live preview update automatically
 5. Click **Export** to save as JSON for future loading
 
 ### Video Files (Python CLI)
 
-For video conversion, use the included Python script:
+For longer or higher-quality video conversion, the Python CLI is also available:
 
 ```bash
-python convert.py input_video.mp4 --width 100 --color --fps 10
+python convert.py input_video.mp4 --width 100 --color
 ```
-
-Then load the generated JSON into the web app.
 
 ## Installation
 
