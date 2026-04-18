@@ -1,5 +1,8 @@
 import { layoutWithLines, prepareWithSegments } from '@chenglou/pretext'
 import { decompressFrames, parseGIF } from 'gifuct-js'
+import { Bench, PlaybackBench } from './bench.js'
+import { decodeVideoWebCodecs } from './video-decoder.js'
+import { loadAsciiWasm, loadGifWasm } from './wasm-loader.js'
 
 // ── ASCII ramps ────────────────────────────────────────────────────────────
 const RAMPS = {
@@ -271,6 +274,16 @@ class App {
         // Cached ramp lookups — only recomputed when ramp string changes
         this._rampCache    = { ramp: null, charLut: null, lut: null }
 
+        // Benchmark instrumentation (logs to console)
+        this._playbackBench = new PlaybackBench()
+
+        // Eagerly attempt to load optional WASM accelerators (no-op if absent).
+        // ascii.wasm is used by the main-thread fallback in _pixelsToAscii;
+        // workers continue to use plain JS (which already gives us parallelism).
+        this._asciiWasm = null
+        loadAsciiWasm().then(m => { this._asciiWasm = m })
+        loadGifWasm()
+
         this._bindUI()
         this._initSliderLabels()
     }
@@ -474,8 +487,8 @@ class App {
             const gif = parseGIF(buf)
             const frames = decompressFrames(gif, true)
             const parts = [`${gif.lsd.width}×${gif.lsd.height}`, `${frames.length} frames`]
-            // gf.delay is centiseconds; convert to ms with 20ms minimum
-            const totalMs = frames.reduce((sum, f) => sum + Math.max(20, (f.delay || 0) * 10), 0)
+            // gf.delay is centiseconds; convert to ms with 10ms (1cs) minimum for data accuracy
+            const totalMs = frames.reduce((sum, f) => sum + Math.max(10, (f.delay || 1) * 10), 0)
             parts.push(this._formatDuration(totalMs / 1000))
             this._setSourceMeta(parts.join(' · '))
         } catch { /* ignore */ }
@@ -554,6 +567,7 @@ class App {
         const isVideo = file.type.startsWith('video/') || /\.(mp4|webm|mov|mkv)$/i.test(file.name)
 
         this._setProgress(0, 'Loading…')
+        const bench = this._bench = new Bench(`convert ${file.name}`)
 
         try {
             let frames, allColors, fps, charW, charH
@@ -593,6 +607,14 @@ class App {
             }
 
             this._applyData(data)
+            bench.report({
+                source:  file.name,
+                grid:    `${data.meta.charWidth}\u00d7${data.meta.charHeight}`,
+                frames:  data.meta.frameCount,
+                fps:     data.meta.fps,
+                color:   data.meta.hasColor,
+                fileMB:  +(file.size / 1048576).toFixed(2),
+            })
         } catch (err) {
             if (gen === this._convertGen) {
                 console.error(err)
@@ -614,104 +636,141 @@ class App {
     }
 
     async _convertGif(file, { width, ramp, color, maxFrames }, gen) {
+        const bench = this._bench
         const buf = await file.arrayBuffer()
-        const gif = parseGIF(buf)
-        const gifFrames = decompressFrames(gif, true)
-        if (!gifFrames?.length) throw new Error('No frames found in GIF')
 
-        const gifW = gif.lsd.width, gifH = gif.lsd.height
-        const aspect = gifH / gifW
-        const charH = Math.max(1, Math.round(width * aspect * 0.5))
-        const charW = width
-
-        const screen = new OffscreenCanvas(gifW, gifH)
-        const sctx   = screen.getContext('2d')
-        const out    = new OffscreenCanvas(charW, charH)   // reused across frames
-        const octx   = out.getContext('2d')
-        const total  = Math.min(gifFrames.length, maxFrames)
+        // ── Decode: try WASM first, fall back to gifuct-js ─────────────────
+        bench?.start('gif.decode')
+        const gifMod = await loadGifWasm()
+        let gifW, gifH, charW, charH, total
+        const frameDelays = []
         const imageDataBufs = []
-        const frameDelays = []  // per-frame delays in ms
-        let totalDur = 0, prev = null
 
-        // Phase 1: composite frames serially (each depends on previous state)
-        for (let i = 0; i < total; i++) {
-            if (gen !== this._convertGen) return null
-            if (i % 10 === 0) await new Promise(r => setTimeout(r, 0))
-            this._setProgress(Math.round(i / total * 50), `Extracting ${i + 1}/${total}…`)
-
-            const gf = gifFrames[i]
-            if (prev?.disposalType === 2)
-                sctx.clearRect(prev.dims.left, prev.dims.top, prev.dims.width, prev.dims.height)
-
-            const patch = new OffscreenCanvas(gf.dims.width, gf.dims.height)
-            patch.getContext('2d').putImageData(new ImageData(gf.patch, gf.dims.width, gf.dims.height), 0, 0)
-            sctx.drawImage(patch, gf.dims.left, gf.dims.top)
-
-            octx.drawImage(screen, 0, 0, charW, charH)
-            imageDataBufs.push(octx.getImageData(0, 0, charW, charH).data)
-            // gf.delay is in centiseconds (GIF89a spec); convert to ms.
-            // Browsers enforce a minimum of ~20ms; a value of 0 or 1 cs would render too fast.
-            const delayMs = Math.max(20, (gf.delay || 0) * 10)
-            frameDelays.push(delayMs)
-            totalDur += delayMs
-            prev = gf
+        if (gifMod) {
+            const decoded = gifMod.decode_gif(new Uint8Array(buf))
+            gifW = decoded.width; gifH = decoded.height
+            const aspect = gifH / gifW
+            charH = Math.max(1, Math.round(width * aspect * 0.5)); charW = width
+            const out  = new OffscreenCanvas(charW, charH)
+            const octx = out.getContext('2d')
+            const src  = new OffscreenCanvas(gifW, gifH)
+            const sctx = src.getContext('2d')
+            const frames = decoded.frames
+            total = Math.min(frames.length, maxFrames)
+            for (let i = 0; i < total; i++) {
+                if (gen !== this._convertGen) { bench?.end('gif.decode'); return null }
+                if (i % 10 === 0) await new Promise(r => setTimeout(r, 0))
+                this._setProgress(Math.round(i / total * 50), `Extracting ${i + 1}/${total}…`)
+                sctx.putImageData(new ImageData(new Uint8ClampedArray(frames[i].rgba), gifW, gifH), 0, 0)
+                octx.drawImage(src, 0, 0, charW, charH)
+                imageDataBufs.push(octx.getImageData(0, 0, charW, charH).data)
+                frameDelays.push(frames[i].delayMs)
+            }
+        } else {
+            const gif = parseGIF(buf)
+            const gifFrames = decompressFrames(gif, true)
+            if (!gifFrames?.length) throw new Error('No frames found in GIF')
+            gifW = gif.lsd.width; gifH = gif.lsd.height
+            const aspect = gifH / gifW
+            charH = Math.max(1, Math.round(width * aspect * 0.5)); charW = width
+            const screen = new OffscreenCanvas(gifW, gifH)
+            const sctx   = screen.getContext('2d')
+            const out    = new OffscreenCanvas(charW, charH)
+            const octx   = out.getContext('2d')
+            total = Math.min(gifFrames.length, maxFrames)
+            let prev = null
+            for (let i = 0; i < total; i++) {
+                if (gen !== this._convertGen) { bench?.end('gif.decode'); return null }
+                if (i % 10 === 0) await new Promise(r => setTimeout(r, 0))
+                this._setProgress(Math.round(i / total * 50), `Extracting ${i + 1}/${total}…`)
+                const gf = gifFrames[i]
+                if (prev?.disposalType === 2)
+                    sctx.clearRect(prev.dims.left, prev.dims.top, prev.dims.width, prev.dims.height)
+                const patch = new OffscreenCanvas(gf.dims.width, gf.dims.height)
+                patch.getContext('2d').putImageData(new ImageData(gf.patch, gf.dims.width, gf.dims.height), 0, 0)
+                sctx.drawImage(patch, gf.dims.left, gf.dims.top)
+                octx.drawImage(screen, 0, 0, charW, charH)
+                imageDataBufs.push(octx.getImageData(0, 0, charW, charH).data)
+                // gf.delay is centiseconds; preserve raw timing (1cs minimum).
+                frameDelays.push(Math.max(10, (gf.delay || 1) * 10))
+                prev = gf
+            }
         }
-
+        bench?.end('gif.decode')
         if (gen !== this._convertGen) return null
 
-        // Phase 2: process all frames in parallel via workers
+        // ── Process: parallel workers (CPU/SIMD via WASM) ──────────────────
+        bench?.start('process')
         const { frames, allColors } = await this._processFrames(
             imageDataBufs, charW, charH, ramp, color, gen,
             (n) => this._setProgress(50 + Math.round(n / total * 50), `Processing ${n}/${total}…`)
         )
+        bench?.end('process')
         if (frames === null) return null
 
-        const avgDelayMs = totalDur / total
-        const fps = Math.max(1, Math.round(1000 / avgDelayMs))
+        const totalDur = frameDelays.reduce((a, b) => a + b, 0)
+        const fps = Math.max(1, Math.round(1000 / (totalDur / total)))
         this._appendSourceMeta(`${fps} fps`)
         return { frames, allColors, fps, frameDelays, charW, charH }
     }
 
     async _convertVideo(file, { width, ramp, color, maxFrames, targetFps }, gen) {
+        const bench = this._bench
         const limitFps = targetFps  // 0 = no limit, >0 = hard cap
-        const url   = URL.createObjectURL(file)
-        const video = document.createElement('video')
-        video.src     = url
-        video.muted   = true
-        video.preload = 'metadata'
 
-        await new Promise((res, rej) => {
-            video.onloadedmetadata = res
-            video.onerror = () => rej(new Error('Failed to load video metadata'))
+        // Probe metadata up front (needed by both decode paths to size the grid).
+        const meta = await new Promise((res, rej) => {
+            const v = document.createElement('video')
+            v.preload = 'metadata'; v.muted = true
+            v.src = URL.createObjectURL(file)
+            v.onloadedmetadata = () => res({
+                vw: v.videoWidth, vh: v.videoHeight, dur: v.duration, url: v.src,
+            })
+            v.onerror = () => rej(new Error('Failed to load video metadata'))
         })
-
-        const duration = video.duration
-        if (!duration || !isFinite(duration)) throw new Error('Cannot determine video duration')
-
-        const aspect = video.videoHeight / video.videoWidth
+        if (!meta.dur || !isFinite(meta.dur)) throw new Error('Cannot determine video duration')
+        const aspect = meta.vh / meta.vw
         const charH  = Math.max(1, Math.round(width * aspect * 0.5))
         const charW  = width
-        const canvas = new OffscreenCanvas(charW, charH)
-        const ctx    = canvas.getContext('2d')
 
-        const useRvfc = ('requestVideoFrameCallback' in video)
-        console.log(`[video] capture: ${useRvfc ? 'RVFC' : 'seek'}, limitFps=${limitFps || 'source'}`)
+        // ── Try WebCodecs first (deterministic, true source fps) ──────────
+        bench?.start('video.decode')
+        let captured = await decodeVideoWebCodecs(
+            file, charW, charH, maxFrames, limitFps,
+            (n, total) => this._setProgress(Math.round(n / Math.max(1, total) * 50), `Decoding ${n}…`)
+        ).catch(e => { console.warn('[webcodecs] failed:', e?.message); return null })
 
-        const captured = useRvfc
-            ? await this._captureRVFC(video, ctx, charW, charH, duration, maxFrames, limitFps, gen)
-            : await this._captureSeek(video, ctx, charW, charH, duration, maxFrames, limitFps, gen)
-
-        URL.revokeObjectURL(url)
+        // ── Fallback: existing RVFC / seek pipeline ───────────────────────
+        if (!captured) {
+            const url   = URL.createObjectURL(file)
+            const video = document.createElement('video')
+            video.src = url; video.muted = true; video.preload = 'metadata'
+            await new Promise((res, rej) => {
+                video.onloadedmetadata = res
+                video.onerror = () => rej(new Error('Failed to load video metadata'))
+            })
+            const canvas = new OffscreenCanvas(charW, charH)
+            const ctx    = canvas.getContext('2d')
+            const useRvfc = ('requestVideoFrameCallback' in video)
+            console.log(`[video] capture: ${useRvfc ? 'RVFC' : 'seek'}, limitFps=${limitFps || 'source'}`)
+            captured = useRvfc
+                ? await this._captureRVFC(video, ctx, charW, charH, meta.dur, maxFrames, limitFps, gen)
+                : await this._captureSeek(video, ctx, charW, charH, meta.dur, maxFrames, limitFps, gen)
+            URL.revokeObjectURL(url)
+        }
+        bench?.end('video.decode')
+        URL.revokeObjectURL(meta.url)
         if (!captured) return null
 
         const { imageDataBufs, outputFps, sourceFps } = captured
         const total = imageDataBufs.length
+        bench?.start('process')
         const { frames, allColors } = await this._processFrames(
             imageDataBufs, charW, charH, ramp, color, gen,
             (n) => this._setProgress(50 + Math.round(n / total * 50), `Processing ${n}/${total}…`)
         )
+        bench?.end('process')
         if (frames === null) return null
-        // Show detected source FPS (constant regardless of FPS limit slider)
         const fpsMeta = sourceFps !== outputFps
             ? `${sourceFps} fps source · ${outputFps} fps output`
             : `${sourceFps} fps`
@@ -899,7 +958,26 @@ class App {
         const rampLen = charLut.length
         const totalPx = width * height
 
-        // ── GPU path ─────────────────────────────────────────────────────
+        // ── WASM SIMD path (preferred when available) ──────────────────
+        const wasm = this._asciiWasm
+        if (wasm && wasm.encode_frame) {
+            try {
+                const colorOut = color ? new Uint8Array(totalPx * 3) : null
+                // wasm-bindgen accepts a JS Uint8Array directly for &[u8].
+                // For Option<Uint8Array> output, we pass a real Uint8Array view.
+                const idx = wasm.encode_frame(imageData.data, width, height, rampLen, colorOut ?? undefined)
+                const lineBuf = new Array(width)
+                const lines = new Array(height)
+                for (let y = 0; y < height; y++) {
+                    const rowOff = y * width
+                    for (let x = 0; x < width; x++) lineBuf[x] = charLut[idx[rowOff + x]]
+                    lines[y] = lineBuf.join('')
+                }
+                return { text: lines.join('\n'), colors: colorOut, charW: width, charH: height }
+            } catch (e) { console.warn('[wasm] encode_frame failed, falling back:', e?.message) }
+        }
+
+        // ── GPU path ──────────────────────────────────────────────
         const gpuOut = _gpuEncoder.encode(imageData, width, height, rampLen)
         if (gpuOut) {
             const colorBuf = color ? new Uint8Array(totalPx * 3) : null
@@ -1115,6 +1193,7 @@ class App {
         this.playing = true
         document.getElementById('btn-play').textContent = '⏸'
         this.lastFrameTime = performance.now()
+        this._playbackBench.reset()
         this._tick()
     }
 
@@ -1143,7 +1222,9 @@ class App {
         const baseDuration = fd ? fd[this.currentFrame] : (1000 / this.data.meta.fps)
         const interval = baseDuration / this.speedMultiplier
         if (now - this.lastFrameTime >= interval) {
+            const t0 = performance.now()
             this._renderFrame((this.currentFrame + 1) % this.data.meta.frameCount)
+            this._playbackBench.onFrame(performance.now() - t0)
             // Use += to keep drift-free timing instead of resetting to now.
             // Cap so we don't spiral into catch-up bursts after tab suspension.
             this.lastFrameTime += interval
