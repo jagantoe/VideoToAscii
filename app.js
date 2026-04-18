@@ -378,6 +378,13 @@ class App {
             else if (e.key === 'ArrowLeft')  { e.preventDefault(); this._stepFrame(-1) }
             else if (e.key === 'ArrowRight') { e.preventDefault(); this._stepFrame(+1) }
         })
+
+        // ── Initialize UI to match current state ──────────────────────────────
+        // Sync render mode dropdown with default renderMode
+        document.getElementById('render-mode').value = this.renderMode
+        document.getElementById('mono-controls').style.display = this.renderMode === 'mono' ? '' : 'none'
+        // Sync light mode checkbox
+        document.getElementById('light-mode').checked = this.lightMode
     }
 
     _initSliderLabels() {
