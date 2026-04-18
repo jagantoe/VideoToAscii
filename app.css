@@ -156,6 +156,15 @@ section { display: flex; flex-direction: column; gap: 8px; }
     text-align: center;
 }
 
+#source-meta {
+    font-size: 10px;
+    color: var(--text-dim);
+    text-align: center;
+    line-height: 1.5;
+    opacity: 0.8;
+}
+#source-meta.hidden { display: none; }
+
 /* Fields */
 .field {
     display: flex;

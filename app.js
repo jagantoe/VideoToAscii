@@ -154,6 +154,93 @@ class _GpuAsciiEncoder {
 }
 const _gpuEncoder = new _GpuAsciiEncoder()
 
+// ── Web Worker pool for parallel pixel processing ──────────────────────────────────
+const _WORKER_SRC = `
+let _cRamp = null, _cCharLut, _cLut
+self.onmessage = ({ data: { pixels, width, height, ramp, color, idx } }) => {
+    if (ramp !== _cRamp) {
+        _cCharLut = Array.from(ramp)
+        const n = _cCharLut.length
+        _cLut = new Uint8Array(256)
+        for (let b = 0; b < 256; b++) _cLut[b] = Math.min((b * n) >> 8, n - 1)
+        _cRamp = ramp
+    }
+    const charLut = _cCharLut, lut = _cLut
+    const totalPx = width * height
+    const colorBuf = color ? new Uint8Array(totalPx * 3) : null
+    const lineBuf = new Array(width)
+    const lines = new Array(height)
+    for (let y = 0; y < height; y++) {
+        const rowOff = y * width
+        for (let x = 0; x < width; x++) {
+            const i = (rowOff + x) * 4
+            const r = pixels[i], g = pixels[i+1], b = pixels[i+2]
+            lineBuf[x] = charLut[lut[(r * 77 + g * 150 + b * 29) >> 8]]
+            if (colorBuf) {
+                const ci = (rowOff + x) * 3
+                colorBuf[ci] = r; colorBuf[ci+1] = g; colorBuf[ci+2] = b
+            }
+        }
+        lines[y] = lineBuf.join('')
+    }
+    const transfer = colorBuf ? [colorBuf.buffer] : []
+    self.postMessage({ text: lines.join('\\n'), colorBuf, idx }, transfer)
+}
+`
+
+class _WorkerPool {
+    constructor() {
+        const n = Math.min(Math.max(navigator.hardwareConcurrency || 2, 2), 8)
+        const url = URL.createObjectURL(new Blob([_WORKER_SRC], { type: 'text/javascript' }))
+        this._workers = Array.from({ length: n }, () => new Worker(url))
+        this._idle    = [...this._workers]
+        this._pending = new Map()   // idx → resolve
+        this._queue   = []
+        URL.revokeObjectURL(url)
+        this._workers.forEach(w => {
+            w.onmessage = e  => this._done(w, e.data)
+            w.onerror   = ev => console.error('[WorkerPool] error', ev)
+        })
+        console.log(`[WorkerPool] ${n} workers ready`)
+    }
+
+    _done(worker, data) {
+        this._pending.get(data.idx)(data)
+        this._pending.delete(data.idx)
+        if (this._queue.length) {
+            const task = this._queue.shift()
+            this._pending.set(task.msg.idx, task.resolve)
+            worker.postMessage(task.msg, task.transfer)
+        } else {
+            this._idle.push(worker)
+        }
+    }
+
+    submit(pixels, width, height, ramp, color, idx) {
+        const msg = { pixels, width, height, ramp, color, idx }
+        const transfer = [pixels.buffer]
+        return new Promise(resolve => {
+            if (this._idle.length) {
+                const w = this._idle.pop()
+                this._pending.set(idx, resolve)
+                w.postMessage(msg, transfer)
+            } else {
+                this._queue.push({ msg, transfer, resolve })
+            }
+        })
+    }
+}
+
+let _workerPool = null, _workerPoolFailed = false
+function _getWorkerPool() {
+    if (_workerPoolFailed) return null
+    if (!_workerPool) {
+        try { _workerPool = new _WorkerPool() }
+        catch (e) { console.warn('[WorkerPool] unavailable:', e.message); _workerPoolFailed = true; return null }
+    }
+    return _workerPool
+}
+
 // ── App ────────────────────────────────────────────────────────────────────
 class App {
     constructor() {
@@ -181,6 +268,8 @@ class App {
         // Conversion
         this._convertGen   = 0
         this._previewTimer = null
+        // Cached ramp lookups — only recomputed when ramp string changes
+        this._rampCache    = { ramp: null, charLut: null, lut: null }
 
         this._bindUI()
         this._initSliderLabels()
@@ -288,7 +377,12 @@ class App {
         }
         sync('s-width', 'width-val', ' chars')
         sync('s-max-frames', 'maxframes-val', '')
-        sync('s-video-fps', 'videofps-val', ' fps')
+        // Video FPS: 0 = Source (no limit)
+        const fpsSl  = document.getElementById('s-video-fps')
+        const fpsLbl = document.getElementById('videofps-val')
+        const fpsUpdate = () => { fpsLbl.textContent = fpsSl.value === '0' ? '(Source)' : fpsSl.value + ' fps' }
+        fpsSl.addEventListener('input', fpsUpdate)
+        fpsUpdate()
     }
 
     // ── File loading ──────────────────────────────────────────────────────
@@ -305,6 +399,9 @@ class App {
         // Show/hide sections
         document.getElementById('convert-section').classList.toggle('hidden', isJson)
         document.getElementById('source-name').textContent = file.name
+        const metaEl = document.getElementById('source-meta')
+        metaEl.textContent = ''
+        metaEl.classList.add('hidden')
 
         if (isJson) {
             document.getElementById('source-thumb').src = ''
@@ -318,9 +415,16 @@ class App {
             if (isVideo) {
                 thumb.src = ''
                 thumb.classList.add('hidden')
+                // Show video metadata when loaded
+                this._showVideoMeta(file)
+            } else if (isGif) {
+                thumb.src = URL.createObjectURL(file)
+                thumb.classList.remove('hidden')
+                this._showGifMeta(file)
             } else {
                 thumb.src = URL.createObjectURL(file)
                 thumb.classList.remove('hidden')
+                this._showImageMeta(file)
             }
 
             document.getElementById('gif-settings').classList.toggle('hidden', !isGif && !isVideo)
@@ -328,6 +432,64 @@ class App {
 
             this._scheduleConvert()
         }
+    }
+
+    _formatDuration(secs) {
+        const m = Math.floor(secs / 60)
+        const s = Math.floor(secs % 60)
+        return m > 0 ? `${m}m ${s}s` : `${s}s`
+    }
+
+    _setSourceMeta(text) {
+        this._sourceBaseMeta = text
+        const el = document.getElementById('source-meta')
+        el.textContent = text
+        el.classList.remove('hidden')
+    }
+
+    _appendSourceMeta(text) {
+        const el = document.getElementById('source-meta')
+        el.textContent = (this._sourceBaseMeta || '') + ' · ' + text
+        el.classList.remove('hidden')
+    }
+
+    _showVideoMeta(file) {
+        const url = URL.createObjectURL(file)
+        const v   = document.createElement('video')
+        v.preload = 'metadata'
+        v.src     = url
+        v.onloadedmetadata = () => {
+            const parts = [`${v.videoWidth}×${v.videoHeight}`]
+            if (v.duration && isFinite(v.duration))
+                parts.push(this._formatDuration(v.duration))
+            this._setSourceMeta(parts.join(' · '))
+            URL.revokeObjectURL(url)
+        }
+        v.onerror = () => URL.revokeObjectURL(url)
+    }
+
+    async _showGifMeta(file) {
+        try {
+            const buf = await file.arrayBuffer()
+            const gif = parseGIF(buf)
+            const frames = decompressFrames(gif, true)
+            const parts = [`${gif.lsd.width}×${gif.lsd.height}`, `${frames.length} frames`]
+            // gf.delay is centiseconds; convert to ms with 20ms minimum
+            const totalMs = frames.reduce((sum, f) => sum + Math.max(20, (f.delay || 0) * 10), 0)
+            parts.push(this._formatDuration(totalMs / 1000))
+            this._setSourceMeta(parts.join(' · '))
+        } catch { /* ignore */ }
+    }
+
+    _showImageMeta(file) {
+        const url = URL.createObjectURL(file)
+        const img = new Image()
+        img.onload = () => {
+            this._setSourceMeta(`${img.naturalWidth}×${img.naturalHeight}`)
+            URL.revokeObjectURL(url)
+        }
+        img.onerror = () => URL.revokeObjectURL(url)
+        img.src = url
     }
 
     async _loadJSON(file) {
@@ -356,6 +518,10 @@ class App {
         document.getElementById('canvas-placeholder').classList.remove('hidden')
         document.getElementById('export-section').classList.add('hidden')
         document.getElementById('info-bar').textContent = ''
+        const metaEl = document.getElementById('source-meta')
+        metaEl.textContent = ''
+        metaEl.classList.add('hidden')
+        this._sourceBaseMeta = ''
     }
 
     // ── Conversion ────────────────────────────────────────────────────────
@@ -375,7 +541,7 @@ class App {
             ramp,
             color:     document.getElementById('s-color').checked,
             maxFrames: parseInt(document.getElementById('s-max-frames').value) || 200,
-            targetFps: parseInt(document.getElementById('s-video-fps').value) || 10,
+            targetFps: parseInt(document.getElementById('s-video-fps').value),  // 0 = no limit (source)
         }
     }
 
@@ -392,11 +558,12 @@ class App {
         try {
             let frames, allColors, fps, charW, charH
 
+            let frameDelays = null
             if (isGif) {
                 const r = await this._convertGif(file, settings, gen)
                 console.log('Conversion result:', r)
                 if (r === null) return
-                ;({ frames, allColors, fps, charW, charH } = r)
+                ;({ frames, allColors, fps, frameDelays, charW, charH } = r)
             } else if (isVideo) {
                 const r = await this._convertVideo(file, settings, gen)
                 if (r === null) return
@@ -414,7 +581,8 @@ class App {
 
             const data = {
                 meta: { source: file.name, charWidth: charW, charHeight: charH,
-                        frameCount: frames.length, fps, hasColor: allColors.length > 0 },
+                        frameCount: frames.length, fps, hasColor: allColors.length > 0,
+                        ...(frameDelays ? { frameDurations: frameDelays } : {}) },
                 frames,
             }
             if (allColors.length > 0) {
@@ -458,14 +626,18 @@ class App {
 
         const screen = new OffscreenCanvas(gifW, gifH)
         const sctx   = screen.getContext('2d')
+        const out    = new OffscreenCanvas(charW, charH)   // reused across frames
+        const octx   = out.getContext('2d')
         const total  = Math.min(gifFrames.length, maxFrames)
-        const frames = [], allColors = []
+        const imageDataBufs = []
+        const frameDelays = []  // per-frame delays in ms
         let totalDur = 0, prev = null
 
+        // Phase 1: composite frames serially (each depends on previous state)
         for (let i = 0; i < total; i++) {
             if (gen !== this._convertGen) return null
-            if (i % 5 === 0) await new Promise(r => setTimeout(r, 0))
-            this._setProgress(Math.round(i / total * 100), `Frame ${i + 1}/${total}`)
+            if (i % 10 === 0) await new Promise(r => setTimeout(r, 0))
+            this._setProgress(Math.round(i / total * 50), `Extracting ${i + 1}/${total}…`)
 
             const gf = gifFrames[i]
             if (prev?.disposalType === 2)
@@ -475,26 +647,37 @@ class App {
             patch.getContext('2d').putImageData(new ImageData(gf.patch, gf.dims.width, gf.dims.height), 0, 0)
             sctx.drawImage(patch, gf.dims.left, gf.dims.top)
 
-            const out = new OffscreenCanvas(charW, charH)
-            const octx = out.getContext('2d')
             octx.drawImage(screen, 0, 0, charW, charH)
-
-            const ascii = this._pixelsToAscii(octx.getImageData(0, 0, charW, charH), charW, charH, ramp, color)
-            frames.push(ascii.text)
-            if (ascii.colors) allColors.push(ascii.colors)
-            totalDur += Math.max(20, gf.delay || 20)  // gifuct-js returns ms; minimum 20ms matches browser
+            imageDataBufs.push(octx.getImageData(0, 0, charW, charH).data)
+            // gf.delay is in centiseconds (GIF89a spec); convert to ms.
+            // Browsers enforce a minimum of ~20ms; a value of 0 or 1 cs would render too fast.
+            const delayMs = Math.max(20, (gf.delay || 0) * 10)
+            frameDelays.push(delayMs)
+            totalDur += delayMs
             prev = gf
         }
 
-        const fps = Math.max(1, Math.round(1000 / (totalDur / total)))
-        return { frames, allColors, fps, charW, charH }
+        if (gen !== this._convertGen) return null
+
+        // Phase 2: process all frames in parallel via workers
+        const { frames, allColors } = await this._processFrames(
+            imageDataBufs, charW, charH, ramp, color, gen,
+            (n) => this._setProgress(50 + Math.round(n / total * 50), `Processing ${n}/${total}…`)
+        )
+        if (frames === null) return null
+
+        const avgDelayMs = totalDur / total
+        const fps = Math.max(1, Math.round(1000 / avgDelayMs))
+        this._appendSourceMeta(`${fps} fps`)
+        return { frames, allColors, fps, frameDelays, charW, charH }
     }
 
     async _convertVideo(file, { width, ramp, color, maxFrames, targetFps }, gen) {
+        const limitFps = targetFps  // 0 = no limit, >0 = hard cap
         const url   = URL.createObjectURL(file)
         const video = document.createElement('video')
-        video.src   = url
-        video.muted = true
+        video.src     = url
+        video.muted   = true
         video.preload = 'metadata'
 
         await new Promise((res, rej) => {
@@ -505,39 +688,215 @@ class App {
         const duration = video.duration
         if (!duration || !isFinite(duration)) throw new Error('Cannot determine video duration')
 
-        const totalFrames = Math.min(Math.floor(duration * targetFps), maxFrames)
-        if (totalFrames === 0) throw new Error('No frames to extract')
-
         const aspect = video.videoHeight / video.videoWidth
         const charH  = Math.max(1, Math.round(width * aspect * 0.5))
         const charW  = width
-
         const canvas = new OffscreenCanvas(charW, charH)
         const ctx    = canvas.getContext('2d')
-        const frames = [], allColors = []
 
+        const useRvfc = ('requestVideoFrameCallback' in video)
+        console.log(`[video] capture: ${useRvfc ? 'RVFC' : 'seek'}, limitFps=${limitFps || 'source'}`)
+
+        const captured = useRvfc
+            ? await this._captureRVFC(video, ctx, charW, charH, duration, maxFrames, limitFps, gen)
+            : await this._captureSeek(video, ctx, charW, charH, duration, maxFrames, limitFps, gen)
+
+        URL.revokeObjectURL(url)
+        if (!captured) return null
+
+        const { imageDataBufs, outputFps, sourceFps } = captured
+        const total = imageDataBufs.length
+        const { frames, allColors } = await this._processFrames(
+            imageDataBufs, charW, charH, ramp, color, gen,
+            (n) => this._setProgress(50 + Math.round(n / total * 50), `Processing ${n}/${total}…`)
+        )
+        if (frames === null) return null
+        // Show detected source FPS (constant regardless of FPS limit slider)
+        const fpsMeta = sourceFps !== outputFps
+            ? `${sourceFps} fps source · ${outputFps} fps output`
+            : `${sourceFps} fps`
+        this._appendSourceMeta(`${fpsMeta} · ${total} frames`)
+        return { frames, allColors, fps: outputFps, charW, charH }
+    }
+
+    // Snap raw fps to nearest standard video frame rate.
+    static _STANDARD_FPS = [10, 12, 15, 20, 23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60]
+    _snapToStandardFps(rawFps) {
+        let best = rawFps, bestDist = Infinity
+        for (const std of this.constructor._STANDARD_FPS) {
+            const d = Math.abs(rawFps - std)
+            if (d < bestDist) { bestDist = d; best = std }
+        }
+        // Only snap if within 8% of a standard rate
+        return bestDist / best < 0.08 ? Math.round(best) : Math.round(rawFps)
+    }
+
+    // Capture via requestVideoFrameCallback — plays at speed, no seeking.
+    // Detects source fps from frame deltas using median of 15+ probes;
+    // snaps to nearest standard frame rate. Chrome 83+, Edge 83+, Safari 15.4+.
+    _captureRVFC(video, ctx, charW, charH, duration, maxFrames, limitFps, gen) {
+        return new Promise(resolve => {
+            const imageDataBufs = []
+            let lastCapturedTime = -Infinity
+            // 0 = capture every frame initially; >0 = enforce interval
+            let targetInterval = limitFps > 0 ? 1 / limitFps : 0
+            let watchdogId = null
+            const fpsProbes = []
+            let detectedFps = null
+            let prevMediaTime = -Infinity
+
+            const finish = () => {
+                clearTimeout(watchdogId)
+                video.onended   = null
+                video.onerror   = null
+                video.onstalled = null
+                video.pause()
+                if (!imageDataBufs.length) { resolve(null); return }
+                // outputFps: use detected source fps (or measured from count/duration),
+                // clamped to limitFps if set, and never implying more frames than we have.
+                const sourceFps   = detectedFps ?? Math.round(imageDataBufs.length / duration)
+                const capFps      = limitFps > 0 ? Math.min(limitFps, sourceFps) : sourceFps
+                const outputFps   = Math.max(1, capFps)
+                resolve({ imageDataBufs, outputFps, sourceFps })
+            }
+
+            const resetWatchdog = () => {
+                clearTimeout(watchdogId)
+                watchdogId = setTimeout(() => {
+                    console.warn('[RVFC] no progress for 3s — finishing with collected frames')
+                    finish()
+                }, 3000)
+            }
+
+            const onFrame = (_, metadata) => {
+                if (gen !== this._convertGen) { finish(); return }
+                resetWatchdog()
+
+                // Probe source fps from early frame deltas using median
+                if (prevMediaTime > -Infinity && detectedFps === null) {
+                    const delta = metadata.mediaTime - prevMediaTime
+                    if (delta > 0.005 && delta < 0.5) fpsProbes.push(delta)
+                    if (fpsProbes.length >= 15) {
+                        // Use median (robust to outlier frames)
+                        const sorted = [...fpsProbes].sort((a, b) => a - b)
+                        const mid = sorted.length >> 1
+                        const median = sorted.length & 1
+                            ? sorted[mid]
+                            : (sorted[mid - 1] + sorted[mid]) / 2
+                        const rawFps = 1 / median
+                        detectedFps = this._snapToStandardFps(rawFps)
+                        console.log(`[RVFC] detected source fps: ${detectedFps} (raw ${rawFps.toFixed(2)}, ${fpsProbes.length} probes, median delta ${(median*1000).toFixed(1)}ms)`)
+                        // If no limit and source would exceed maxFrames, spread evenly
+                        if (limitFps === 0 && duration * detectedFps > maxFrames) {
+                            targetInterval = duration / maxFrames
+                            console.log(`[RVFC] maxFrames throttle: interval=${targetInterval.toFixed(3)}s`)
+                        }
+                    }
+                }
+                prevMediaTime = metadata.mediaTime
+
+                if (metadata.mediaTime - lastCapturedTime >= targetInterval - 0.001) {
+                    lastCapturedTime = metadata.mediaTime
+                    ctx.drawImage(video, 0, 0, charW, charH)
+                    imageDataBufs.push(ctx.getImageData(0, 0, charW, charH).data)
+                    this._setProgress(
+                        Math.min(49, Math.round(imageDataBufs.length / Math.max(1, duration * (detectedFps ?? 30)) * 50)),
+                        `Extracting frame ${imageDataBufs.length}…`
+                    )
+                }
+
+                if (!video.ended && imageDataBufs.length < maxFrames) {
+                    video.requestVideoFrameCallback(onFrame)
+                } else {
+                    finish()
+                }
+            }
+
+            video.onended   = () => finish()
+            video.onerror   = () => resolve(imageDataBufs.length ? { imageDataBufs, outputFps: detectedFps ?? 1, sourceFps: detectedFps ?? 1 } : null)
+            video.onstalled = () => resetWatchdog()
+            video.requestVideoFrameCallback(onFrame)
+            video.playbackRate = 8
+            resetWatchdog()
+            video.play().catch(() => finish())
+        })
+    }
+
+    // Capture by seeking to each timestamp — universal fallback.
+    // limitFps=0 means use source fps; inferred as min(30, maxFrames/duration) since
+    // HTML video elements don't expose source fps directly.
+    async _captureSeek(video, ctx, charW, charH, duration, maxFrames, limitFps, gen) {
+        // Determine fps to use
+        const maxFpsFromFrames = maxFrames / duration
+        const seekFps = limitFps > 0
+            ? Math.min(limitFps, maxFpsFromFrames)
+            : Math.min(30, maxFpsFromFrames)  // assume up to 30fps source
+        const totalFrames = Math.max(1, Math.round(duration * seekFps))
+        const outputFps   = Math.max(1, Math.round(seekFps))
+        const sourceFps   = outputFps  // seek fallback has no independent source-fps detection
+
+        const imageDataBufs = []
         for (let i = 0; i < totalFrames; i++) {
-            if (gen !== this._convertGen) { URL.revokeObjectURL(url); return null }
+            if (gen !== this._convertGen) return null
             if (i % 5 === 0) await new Promise(r => setTimeout(r, 0))
-            this._setProgress(Math.round(i / totalFrames * 100), `Frame ${i + 1}/${totalFrames}`)
+            this._setProgress(Math.round(i / totalFrames * 50), `Extracting ${i + 1}/${totalFrames}…`)
 
-            video.currentTime = i / targetFps
+            video.currentTime = i / seekFps
             await new Promise(res => { video.onseeked = res })
 
             ctx.drawImage(video, 0, 0, charW, charH)
-            const ascii = this._pixelsToAscii(ctx.getImageData(0, 0, charW, charH), charW, charH, ramp, color)
-            frames.push(ascii.text)
-            if (ascii.colors) allColors.push(ascii.colors)
+            imageDataBufs.push(ctx.getImageData(0, 0, charW, charH).data)
+        }
+        return { imageDataBufs, outputFps, sourceFps }
+    }
+
+    // Process pixel buffers in parallel via Web Workers.
+    // Falls back to single-threaded _pixelsToAscii if workers unavailable.
+    async _processFrames(imageDataBufs, charW, charH, ramp, color, gen, progressCb) {
+        const pool = _getWorkerPool()
+        if (pool) {
+            let completed = 0
+            const promises = imageDataBufs.map((pixels, idx) =>
+                pool.submit(pixels, charW, charH, ramp, color, idx).then(result => {
+                    progressCb?.(++completed)
+                    return result
+                })
+            )
+            const results = await Promise.all(promises)
+            if (gen !== this._convertGen) return { frames: null, allColors: null }
+            return {
+                frames:    results.map(r => r.text),
+                allColors: results.map(r => r.colorBuf).filter(Boolean),
+            }
         }
 
-        URL.revokeObjectURL(url)
-        return { frames, allColors, fps: targetFps, charW, charH }
+        // Workers unavailable — single-threaded fallback
+        const frames = [], allColors = []
+        for (let i = 0; i < imageDataBufs.length; i++) {
+            if (gen !== this._convertGen) return { frames: null, allColors: null }
+            const ascii = this._pixelsToAscii({ data: imageDataBufs[i] }, charW, charH, ramp, color)
+            frames.push(ascii.text)
+            if (ascii.colors) allColors.push(ascii.colors)
+            progressCb?.(i + 1)
+        }
+        return { frames, allColors }
     }
 
     _pixelsToAscii(imageData, width, height, ramp, color) {
-        // Pre-build char lookup: index → character (handles multi-byte Unicode ramp chars)
-        const charLut = Array.from(ramp)
-        const rampLen = ramp.length
+        // Cache charLut + lut — only rebuilt when the ramp string changes
+        let charLut, lut
+        if (this._rampCache.ramp === ramp) {
+            charLut = this._rampCache.charLut
+            lut     = this._rampCache.lut
+        } else {
+            charLut = Array.from(ramp)
+            const rampLen0 = charLut.length
+            lut = new Uint8Array(256)
+            for (let b = 0; b < 256; b++)
+                lut[b] = Math.min((b * rampLen0) >> 8, rampLen0 - 1)
+            this._rampCache = { ramp, charLut, lut }
+        }
+        const rampLen = charLut.length
         const totalPx = width * height
 
         // ── GPU path ─────────────────────────────────────────────────────
@@ -562,10 +921,7 @@ class App {
         }
 
         // ── CPU fallback ─────────────────────────────────────────────────
-        const lut = new Uint8Array(256)
-        for (let b = 0; b < 256; b++)
-            lut[b] = Math.min((b * rampLen) >> 8, rampLen - 1)
-
+        // lut is already populated from the cache above
         const d = imageData.data
         const colorBuf = color ? new Uint8Array(totalPx * 3) : null
         const lineBuf = new Array(width)
@@ -781,10 +1137,17 @@ class App {
     _tick() {
         if (!this.playing) return
         const now = performance.now()
-        const interval = 1000 / (this.data.meta.fps * this.speedMultiplier)
+        const fd = this.data.meta.frameDurations
+        // Use per-frame duration if available (GIFs can have variable delays),
+        // otherwise fall back to uniform fps.
+        const baseDuration = fd ? fd[this.currentFrame] : (1000 / this.data.meta.fps)
+        const interval = baseDuration / this.speedMultiplier
         if (now - this.lastFrameTime >= interval) {
             this._renderFrame((this.currentFrame + 1) % this.data.meta.frameCount)
-            this.lastFrameTime = now
+            // Use += to keep drift-free timing instead of resetting to now.
+            // Cap so we don't spiral into catch-up bursts after tab suspension.
+            this.lastFrameTime += interval
+            if (this.lastFrameTime < now - interval) this.lastFrameTime = now
         }
         this.animationId = requestAnimationFrame(() => this._tick())
     }
