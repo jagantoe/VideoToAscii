@@ -575,7 +575,6 @@ class App {
             let frameDelays = null
             if (isGif) {
                 const r = await this._convertGif(file, settings, gen)
-                console.log('Conversion result:', r)
                 if (r === null) return
                 ;({ frames, allColors, fps, frameDelays, charW, charH } = r)
             } else if (isVideo) {
@@ -652,7 +651,7 @@ class App {
             const aspect = gifH / gifW
             charH = Math.max(1, Math.round(width * aspect * 0.5)); charW = width
             const out  = new OffscreenCanvas(charW, charH)
-            const octx = out.getContext('2d')
+            const octx = out.getContext('2d', { willReadFrequently: true })
             const src  = new OffscreenCanvas(gifW, gifH)
             const sctx = src.getContext('2d')
             const frames = decoded.frames
@@ -676,7 +675,7 @@ class App {
             const screen = new OffscreenCanvas(gifW, gifH)
             const sctx   = screen.getContext('2d')
             const out    = new OffscreenCanvas(charW, charH)
-            const octx   = out.getContext('2d')
+            const octx   = out.getContext('2d', { willReadFrequently: true })
             total = Math.min(gifFrames.length, maxFrames)
             let prev = null
             for (let i = 0; i < total; i++) {
@@ -691,8 +690,11 @@ class App {
                 sctx.drawImage(patch, gf.dims.left, gf.dims.top)
                 octx.drawImage(screen, 0, 0, charW, charH)
                 imageDataBufs.push(octx.getImageData(0, 0, charW, charH).data)
-                // gf.delay is centiseconds; preserve raw timing (1cs minimum).
-                frameDelays.push(Math.max(10, (gf.delay || 1) * 10))
+                // gf.delay is centiseconds. Apply browser-compatible minimum:
+                // delays < 2cs (20ms) are treated as 10cs (100ms), matching
+                // real browser GIF rendering behaviour for "fast" frames.
+                const rawCs = gf.delay ?? 0
+                frameDelays.push(rawCs < 2 ? 100 : rawCs * 10)
                 prev = gf
             }
         }
@@ -750,7 +752,7 @@ class App {
                 video.onerror = () => rej(new Error('Failed to load video metadata'))
             })
             const canvas = new OffscreenCanvas(charW, charH)
-            const ctx    = canvas.getContext('2d')
+            const ctx    = canvas.getContext('2d', { willReadFrequently: true })
             const useRvfc = ('requestVideoFrameCallback' in video)
             console.log(`[video] capture: ${useRvfc ? 'RVFC' : 'seek'}, limitFps=${limitFps || 'source'}`)
             captured = useRvfc

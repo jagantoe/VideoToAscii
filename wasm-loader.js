@@ -12,10 +12,17 @@ let _simdOk = null
 async function _hasSimd() {
     if (_simdOk !== null) return _simdOk
     try {
-        // Tiny SIMD module header: (module (func (result v128) v128.const i32x4 0 0 0 0))
+        // (module (func (result v128) v128.const i8x16 0 ...(×16)))
+        // Body = local_count(1) + v128.const opcode(2) + 16-byte immediate + end(1) = 20 bytes
+        // Code section content = num_funcs(1) + body_size(1) + body(20) = 22 bytes
         const bytes = new Uint8Array([
-            0,97,115,109,1,0,0,0, 1,5,1,96,0,1,123, 3,2,1,0,
-            10,18,1,16,0, 253,12,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,11
+            0,97,115,109,1,0,0,0,   // magic + version
+            1,5,1,96,0,1,123,       // type section: (func () -> v128)
+            3,2,1,0,                // function section
+            10,22,1,20,0,           // code section: size=22, 1 func, body=20, 0 locals
+            253,12,                 // v128.const opcode
+            0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, // 16-byte immediate
+            11                      // end
         ])
         _simdOk = await WebAssembly.validate(bytes)
     } catch { _simdOk = false }
