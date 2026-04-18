@@ -58,16 +58,18 @@ export class Bench {
         const mem = (typeof performance !== 'undefined' && performance.memory)
             ? `${(performance.memory.usedJSHeapSize / 1048576).toFixed(1)} MB`
             : 'n/a'
-        console.groupCollapsed(
-            `%c[bench] ${this.label} — ${wall.toFixed(0)} ms wall · heap ${mem}`,
-            'color:#00ff41;font-weight:bold'
-        )
-        for (const k in extra) console.log(`  ${k}:`, extra[k])
-        console.table(rows)
+        const phaseStr = rows
+            .map(r => `    ${r.phase.padEnd(16)} ${String(r.ms).padStart(6)}ms  (${r.pct}%)`)
+            .join('\n')
         const overhead = wall - measured
-        if (overhead > 0)
-            console.log(`  unmeasured: ${overhead.toFixed(1)} ms (${(overhead/wall*100).toFixed(1)}%)`)
-        console.groupEnd()
+        const ohStr = overhead > 1
+            ? `\n    ${'other'.padEnd(16)} ${overhead.toFixed(1).padStart(6)}ms  (${(overhead/wall*100).toFixed(1)}%)` : ''
+        const extraStr = Object.entries(extra).map(([k,v]) => `${k}=${v}`).join('  ')
+        console.log(
+            `%c[bench] ${this.label}%c  ${wall.toFixed(0)}ms wall · heap ${mem}\n` +
+            `    ${extraStr}\n${phaseStr}${ohStr}`,
+            'color:#00ff41;font-weight:bold', 'color:#888'
+        )
         return { wall, rows, extra }
     }
 }
@@ -84,15 +86,5 @@ export class PlaybackBench {
     onFrame(renderMs) {
         this._frames += 1
         this._renderTotal += renderMs
-        const now = _now()
-        if (now - this._lastLog >= 2000) {
-            const fps = this._frames * 1000 / (now - this._t0)
-            const avg = this._renderTotal / this._frames
-            console.log(
-                `%c[playback] ${fps.toFixed(1)} fps · render avg ${avg.toFixed(2)} ms · ${this._frames} frames`,
-                'color:#888'
-            )
-            this._lastLog = now
-        }
     }
 }
