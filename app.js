@@ -27,6 +27,133 @@ const COLOR_PRESETS = {
     black:    { fg: '#111111', bg: '#f5f5f0' },
 }
 
+// ── GPU ASCII encoder (WebGL, lazy-init) ────────────────────────────────────
+// Runs luminance + ramp-index computation in a fragment shader.
+// Falls back transparently to CPU if WebGL is unavailable.
+class _GpuAsciiEncoder {
+    constructor() {
+        this._ready   = null   // null = untested, true = ok, false = unavailable
+        this._gl      = null
+        this._prog    = null
+        this._quadBuf = null
+        this._tex     = null
+        this._uLen    = null
+        this._aPos    = -1
+        this._aUv     = -1
+        this._outBuf  = null   // reused readPixels buffer to reduce GC
+    }
+
+    _init() {
+        if (this._ready !== null) return this._ready
+        try {
+            const canvas = new OffscreenCanvas(1, 1)
+            const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl')
+            if (!gl) { this._ready = false; return false }
+
+            // Flush any driver-accumulated errors before setup
+            while (gl.getError() !== gl.NO_ERROR) {}
+
+            const vert = `
+                attribute vec2 a_p, a_u;
+                varying vec2 v;
+                void main(){ gl_Position=vec4(a_p,0,1); v=a_u; }`
+
+            // Output: R = ramp index (0..rampLen-1), G/B/A = original R/G/B
+            // Encoding ramp index as R/255 is safe for all ramps (max 50 chars)
+            const frag = `
+                precision highp float;
+                uniform sampler2D t; uniform float n;
+                varying vec2 v;
+                void main(){
+                    vec4 c = texture2D(t, v);
+                    float l = 0.299*c.r + 0.587*c.g + 0.114*c.b;
+                    gl_FragColor = vec4(min(floor(l*n), n-1.0)/255.0, c.r, c.g, c.b);
+                }`
+
+            const compile = (type, src) => {
+                const sh = gl.createShader(type)
+                gl.shaderSource(sh, src); gl.compileShader(sh)
+                if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS))
+                    throw new Error(gl.getShaderInfoLog(sh))
+                return sh
+            }
+
+            const prog = gl.createProgram()
+            gl.attachShader(prog, compile(gl.VERTEX_SHADER, vert))
+            gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, frag))
+            gl.linkProgram(prog)
+            if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
+                throw new Error(gl.getProgramInfoLog(prog))
+            gl.useProgram(prog)
+
+            // Full-screen quad (triangle strip: BL BR TL TR)
+            // UV Y is inverted so readPixels row order matches ImageData row order
+            // (requires UNPACK_FLIP_Y_WEBGL=true on texImage2D upload)
+            const buf = gl.createBuffer()
+            gl.bindBuffer(gl.ARRAY_BUFFER, buf)
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+                -1,-1, 0,1,   1,-1, 1,1,   -1,1, 0,0,   1,1, 1,0
+            ]), gl.STATIC_DRAW)
+
+            const aPos = gl.getAttribLocation(prog, 'a_p')
+            const aUv  = gl.getAttribLocation(prog, 'a_u')
+            gl.enableVertexAttribArray(aPos)
+            gl.enableVertexAttribArray(aUv)
+
+            const tex = gl.createTexture()
+            gl.bindTexture(gl.TEXTURE_2D, tex)
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+
+            this._gl = gl; this._prog = prog; this._quadBuf = buf; this._tex = tex
+            this._uLen = gl.getUniformLocation(prog, 'n')
+            this._aPos = aPos; this._aUv = aUv
+            this._ready = true
+            console.log('[GPU] WebGL ASCII encoder ready')
+            return true
+        } catch(e) {
+            console.warn('[GPU] WebGL unavailable, using CPU fallback:', e.message)
+            this._ready = false
+            return false
+        }
+    }
+
+    // Returns Uint8Array (width*height*4): R=rampIdx, G/B/A=orig R/G/B per pixel
+    // Returns null on failure → CPU fallback
+    encode(imageData, width, height, rampLen) {
+        if (!this._init()) return null
+        const gl = this._gl
+        try {
+            if (gl.canvas.width !== width || gl.canvas.height !== height) {
+                gl.canvas.width = width; gl.canvas.height = height
+                gl.viewport(0, 0, width, height)
+            }
+            gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true)
+            gl.bindTexture(gl.TEXTURE_2D, this._tex)
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0,
+                          gl.RGBA, gl.UNSIGNED_BYTE, imageData.data)
+            gl.uniform1f(this._uLen, rampLen)
+            gl.bindBuffer(gl.ARRAY_BUFFER, this._quadBuf)
+            gl.vertexAttribPointer(this._aPos, 2, gl.FLOAT, false, 16, 0)
+            gl.vertexAttribPointer(this._aUv,  2, gl.FLOAT, false, 16, 8)
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+
+            const size = width * height * 4
+            if (!this._outBuf || this._outBuf.length < size)
+                this._outBuf = new Uint8Array(size)
+            gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, this._outBuf)
+            if (gl.getError() !== gl.NO_ERROR) return null
+            return this._outBuf
+        } catch(e) {
+            console.warn('[GPU] encode error:', e.message)
+            return null
+        }
+    }
+}
+const _gpuEncoder = new _GpuAsciiEncoder()
+
 // ── App ────────────────────────────────────────────────────────────────────
 class App {
     constructor() {
@@ -291,9 +418,10 @@ class App {
                 frames,
             }
             if (allColors.length > 0) {
-                const { palette, paletteMap } = this._buildPalette(allColors)
+                const pxPerFrame = charW * charH
+                const { palette, paletteMap } = this._buildPalette(allColors, pxPerFrame)
                 data.palette   = palette
-                data.colorMaps = allColors.map(fc => this._mapColors(fc, paletteMap))
+                data.colorMaps = allColors.map(fc => Array.from(this._mapColors(fc, pxPerFrame, paletteMap)))
             }
 
             this._applyData(data)
@@ -407,41 +535,82 @@ class App {
     }
 
     _pixelsToAscii(imageData, width, height, ramp, color) {
-        const d = imageData.data
-        const lines = [], colors = color ? [] : null
-        for (let y = 0; y < height; y++) {
-            let line = ''
-            for (let x = 0; x < width; x++) {
-                const i = (y * width + x) * 4
-                const r = d[i], g = d[i+1], b = d[i+2]
-                const br = Math.round(0.299*r + 0.587*g + 0.114*b)
-                line += ramp[Math.min(Math.floor(br/256*ramp.length), ramp.length-1)]
-                if (colors) colors.push([r, g, b])
+        // Pre-build char lookup: index → character (handles multi-byte Unicode ramp chars)
+        const charLut = Array.from(ramp)
+        const rampLen = ramp.length
+        const totalPx = width * height
+
+        // ── GPU path ─────────────────────────────────────────────────────
+        const gpuOut = _gpuEncoder.encode(imageData, width, height, rampLen)
+        if (gpuOut) {
+            const colorBuf = color ? new Uint8Array(totalPx * 3) : null
+            const lineBuf = new Array(width)
+            const lines = new Array(height)
+            for (let y = 0; y < height; y++) {
+                const rowOff = y * width
+                for (let x = 0; x < width; x++) {
+                    const i = (rowOff + x) * 4
+                    lineBuf[x] = charLut[gpuOut[i]]
+                    if (colorBuf) {
+                        const ci = (rowOff + x) * 3
+                        colorBuf[ci] = gpuOut[i+1]; colorBuf[ci+1] = gpuOut[i+2]; colorBuf[ci+2] = gpuOut[i+3]
+                    }
+                }
+                lines[y] = lineBuf.join('')
             }
-            lines.push(line)
+            return { text: lines.join('\n'), colors: colorBuf, charW: width, charH: height }
         }
-        return { text: lines.join('\n'), colors, charW: width, charH: height }
+
+        // ── CPU fallback ─────────────────────────────────────────────────
+        const lut = new Uint8Array(256)
+        for (let b = 0; b < 256; b++)
+            lut[b] = Math.min((b * rampLen) >> 8, rampLen - 1)
+
+        const d = imageData.data
+        const colorBuf = color ? new Uint8Array(totalPx * 3) : null
+        const lineBuf = new Array(width)
+        const lines = new Array(height)
+        for (let y = 0; y < height; y++) {
+            const rowOff = y * width
+            for (let x = 0; x < width; x++) {
+                const i = (rowOff + x) * 4
+                const r = d[i], g = d[i+1], b = d[i+2]
+                lineBuf[x] = charLut[lut[(r * 77 + g * 150 + b * 29) >> 8]]
+                if (colorBuf) {
+                    const ci = (rowOff + x) * 3
+                    colorBuf[ci] = r; colorBuf[ci+1] = g; colorBuf[ci+2] = b
+                }
+            }
+            lines[y] = lineBuf.join('')
+        }
+        return { text: lines.join('\n'), colors: colorBuf, charW: width, charH: height }
     }
 
-    _buildPalette(allColors) {
-        const map = new Map()
-        for (const fc of allColors)
-            for (const [r, g, b] of fc) {
-                const k = this._quantKey(r, g, b)
-                map.set(k, true)
+    _buildPalette(allColors, pixelsPerFrame) {
+        // Use integer key: quantized (r4<<8|g4)<<8|b4 — avoids string allocation
+        const seen = new Set()
+        for (const buf of allColors) {
+            for (let i = 0, len = pixelsPerFrame * 3; i < len; i += 3) {
+                const k = ((buf[i] & 0xF0) << 8) | ((buf[i + 1] & 0xF0) << 4) | (buf[i + 2] >> 4)
+                seen.add(k)
             }
-        const palette = [...map.keys()].sort()
-        const paletteMap = new Map(palette.map((c, i) => [c, i]))
+        }
+        const sorted = [...seen].sort((a, b) => a - b)
+        const palette = sorted.map(k => {
+            const r = (k >> 8) & 0xF0, g = (k >> 4) & 0xF0, b = (k & 0xF) << 4
+            return `#${r.toString(16).padStart(2,'0')}${g.toString(16).padStart(2,'0')}${b.toString(16).padStart(2,'0')}`
+        })
+        const paletteMap = new Map(sorted.map((k, i) => [k, i]))
         return { palette, paletteMap }
     }
 
-    _mapColors(frameColors, paletteMap) {
-        return frameColors.map(([r, g, b]) => paletteMap.get(this._quantKey(r, g, b)))
-    }
-
-    _quantKey(r, g, b) {
-        const qr = (r >> 4) << 4, qg = (g >> 4) << 4, qb = (b >> 4) << 4
-        return `#${qr.toString(16).padStart(2,'0')}${qg.toString(16).padStart(2,'0')}${qb.toString(16).padStart(2,'0')}`
+    _mapColors(colorBuf, pixelsPerFrame, paletteMap) {
+        const out = new Uint16Array(pixelsPerFrame)
+        for (let p = 0, ci = 0; p < pixelsPerFrame; p++, ci += 3) {
+            const k = ((colorBuf[ci] & 0xF0) << 8) | ((colorBuf[ci + 1] & 0xF0) << 4) | (colorBuf[ci + 2] >> 4)
+            out[p] = paletteMap.get(k)
+        }
+        return out
     }
 
     _setProgress(pct, text) {
