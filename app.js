@@ -591,7 +591,7 @@ class App {
             } else {
                 const r = await this._convertImage(file, settings)
                 frames   = [r.text]
-                allColors = r.colors ? [r.colors] : []
+                allColors = r.colorKeys ? [r.colorKeys] : []
                 fps      = 1
                 charW    = r.charW
                 charH    = r.charH
